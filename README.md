@@ -21,6 +21,7 @@ way_of_the_king/
 - [Roadmap до MVP и 1M DAU](docs/ROADMAP.md)
 - [Схема базы данных](docs/DATABASE.md) — таблицы, индексы, триггеры, партиционирование
 - [Жизненный цикл прохождения данжа](docs/RUN-LIFECYCLE.md) — где живёт state, recovery-сценарии
+- [Security policy](docs/SECURITY.md) — threat model, операционные процедуры, accepted risks
 - [Тикеты на 1-ю неделю](docs/WEEK-1-TICKETS.md)
 
 ## Стек

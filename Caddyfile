@@ -1,9 +1,21 @@
-# Local dev — без TLS
+# Local dev — без TLS.
+# Production-блок ниже под комментарием.
+
 {
 	auto_https off
 }
 
 :80 {
+	# Скрыть Server header
+	header -Server
+
+	# Минимальные security headers даже в dev — чтобы поведение было
+	# консистентным между dev и prod.
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
 	# REST API
 	handle /api/* {
 		reverse_proxy backend:8000
@@ -25,17 +37,70 @@
 	}
 }
 
-# Production-конфиг закомментирован — раскомментить при деплое
+# ============================================================================
+# Production. Раскомментировать при деплое и заменить домен.
+# ============================================================================
+#
 # wayoftheking.app {
+# 	encode zstd gzip
+#
+# 	# Обязательные security headers
+# 	header {
+# 		# 1 год HSTS, включая subdomains, готовность к preload list
+# 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#
+# 		# Запрет MIME-sniffing (защита от XSS через Content-Type confusion)
+# 		X-Content-Type-Options "nosniff"
+#
+# 		# Не утекать full URL referrer на сторонние сайты
+# 		Referrer-Policy "strict-origin-when-cross-origin"
+#
+# 		# Отключить ненужные браузерные API
+# 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=()"
+#
+# 		# Content Security Policy.
+# 		# - frame-ancestors разрешает встраивание Mini App в Telegram (обязательно).
+# 		# - script-src https://telegram.org — официальный telegram-web-app.js.
+# 		# - connect-src — REST + WSS на наш домен + TON Center API.
+# 		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' wss://wayoftheking.app https://wayoftheking.app https://*.toncenter.com; frame-ancestors https://t.me https://web.telegram.org https://*.web.telegram.org; base-uri 'self'; form-action 'self'; object-src 'none'"
+#
+# 		# Не отдавать identity сервера
+# 		-Server
+# 	}
+#
+# 	# CORS preflight ходит через FastAPI; здесь не дублируем.
+#
+# 	# REST API
 # 	handle /api/* {
 # 		reverse_proxy backend:8000
 # 	}
+#
+# 	# WebSocket
 # 	handle /game/* {
 # 		reverse_proxy realtime:2567
 # 	}
+#
+# 	# Health (минимальный, без раскрытия версии)
+# 	handle /health {
+# 		respond "ok" 200
+# 	}
+#
+# 	# Запрет .git, .env и подобного
+# 	@hidden {
+# 		path /.git/* /.env* /Dockerfile* /docker-compose* /pyproject.toml /package.json
+# 	}
+# 	respond @hidden 404
+#
+# 	# Frontend SPA fallback
 # 	handle {
 # 		root * /srv/frontend
 # 		try_files {path} /index.html
 # 		file_server
+# 	}
+#
+# 	# Логи без access tokens
+# 	log {
+# 		output file /var/log/caddy/access.log
+# 		format json
 # 	}
 # }

@@ -28,6 +28,8 @@ dependencies = [
     "structlog>=24.4",
     "sentry-sdk[fastapi]>=2.18",
     "prometheus-fastapi-instrumentator>=7.0",
+    # Rate limiting
+    "slowapi>=0.1.9",
     # Game logic helpers
     "msgspec>=0.18",
     "numpy>=2.1",

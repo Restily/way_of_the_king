@@ -21,6 +21,7 @@
     "@colyseus/ws-transport": "^0.16.0",
     "colyseus": "^0.16.0",
     "express": "^4.21.0",
+    "express-basic-auth": "^1.2.1",
     "jsonwebtoken": "^9.0.2",
     "msgpackr": "^1.11.0",
     "pino": "^9.5.0",
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
+    "@types/express-basic-auth": "^1.1.6",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",

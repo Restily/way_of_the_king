@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.env.local
+.env.*.local
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+.next/
+.nuxt/
+.cache/
+
+# Vite
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local config
+*.local
+
+# Logs
+*.log
+logs/
+
+# Secrets (NEVER commit)
+secrets/
+*.pem
+*.key
+master_seed.txt
+mnemonic*.txt
+
+# Build artifacts
+realtime/build/
+realtime/lib/
+
+# Coverage
+coverage/
+
+# Docker volumes (if using local mounts)
+.docker-data/
+postgres-data/
+redis-data/
+
+# Caddy
+caddy_data/
+caddy_config/

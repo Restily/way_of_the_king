@@ -1,0 +1,1303 @@
+# Way Of The King — Схема базы данных
+
+Версия: 0.1
+Последнее обновление: 2026-04-27
+СУБД: PostgreSQL 16
+
+Документ описывает все таблицы, связи, индексы, триггеры и принципы проектирования. Финальный SQL живёт в Alembic-миграциях, этот документ — источник истины.
+
+---
+
+## 1. Конвенции
+
+### 1.1 Именование
+
+- **Таблицы** — `snake_case`, множественное число (`users`, `dungeon_runs`)
+- **Колонки** — `snake_case`, единственное число
+- **Первичные ключи** — `id` (`bigserial` для основных, `uuid` для тех, что ссылаются клиентом)
+- **Внешние ключи** — `<table_singular>_id` (`user_id`, `character_id`)
+- **Timestamp поля** — `*_at` (`created_at`, `updated_at`)
+- **Boolean поля** — `is_*` или `has_*` (`is_blocked`, `has_kyc`)
+- **Enum поля** — text + CHECK constraint (Postgres enum типы избегаем — больно мигрировать)
+- **Индексы** — `ix_<table>_<columns>` (`ix_users_telegram_id`)
+- **Constraints** — `ck_<table>_<rule>`, `uq_<table>_<columns>`
+- **Foreign keys** — `fk_<table>_<column>`
+
+### 1.2 Типы
+
+- **Деньги/количества** — `BIGINT` (gold = "копейки", 1 UI gold = 1000 в БД)
+- **Большие коллекции/JSON** — `JSONB` (с GIN индексом если нужен поиск)
+- **Время** — `TIMESTAMPTZ` всегда (никогда `TIMESTAMP`)
+- **Текст переменной длины** — `TEXT` (не `VARCHAR(N)`, длина проверяется на app-уровне)
+- **Идентификаторы Telegram** — `BIGINT` (Telegram использует int64)
+- **TON-адреса** — `TEXT` (длина переменная, для совместимости с raw / friendly форматами)
+- **Хеши, mnemonic-derived ключи** — `BYTEA`
+
+### 1.3 Принципы
+
+- **Только-вперёд миграции** — никаких `DROP TABLE` для данных, только `ADD/RENAME`
+- **Все балансовые операции — в DB транзакциях**
+- **Soft delete для аудита** — блокировка вместо удаления для users, items
+- **`updated_at` через триггер** на всех таблицах с мутирующими данными
+- **`idempotency_key`** на всех write-таблицах с внешним вызовом
+- **Партиционирование** для high-volume (`transactions`, `audit_events`, `run_encounters`)
+
+---
+
+## 2. ER-диаграмма (Mermaid)
+
+```mermaid
+erDiagram
+    users ||--o| balances : "1:1"
+    users ||--o| wallets : "1:1"
+    users ||--o{ characters : "1:N"
+    users ||--o{ items : "owns"
+    users ||--o{ transactions : "audit"
+    users ||--o{ dungeon_runs : "starts"
+    users ||--o{ deposits : "receives"
+    users ||--o{ withdrawals : "requests"
+    users ||--o{ audit_events : "subject of"
+    users ||--o{ campaign_progress : "progresses"
+    users ||--o{ daily_dungeon_entries : "tracks"
+    users ||--o{ referrals : "refers"
+    users ||--o| user_security : "1:1"
+
+    characters ||--o{ items : "equipped on"
+    characters ||--o{ dungeon_runs : "plays in"
+
+    item_bases ||--o{ items : "instantiated as"
+    affix_pools ||--o{ items : "rolls from"
+
+    dungeons ||--o{ dungeon_runs : "template for"
+    dungeon_runs ||--o{ run_encounters : "consists of"
+
+    market_listings ||--|| items : "escrows"
+    market_listings ||--o{ market_sales : "results in"
+
+    pvp_seasons ||--o{ pvp_matches : "contains"
+
+    treasury_log }o--|| withdrawals : "may reference"
+    treasury_log }o--|| deposits : "may reference"
+```
+
+---
+
+## 3. Таблицы — User & Auth
+
+### 3.1 `users`
+
+Главная таблица аккаунтов. Один Telegram-юзер = одна запись.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `telegram_id` | BIGINT | NOT NULL | — | Telegram user.id, уникален |
+| `telegram_username` | TEXT | NULL | — | @username, может меняться |
+| `telegram_first_name` | TEXT | NULL | — | для UI display |
+| `telegram_language_code` | TEXT | NULL | — | от Telegram, для дефолта locale |
+| `locale` | TEXT | NOT NULL | `'ru'` | Текущий язык игры |
+| `ip_country` | TEXT | NULL | — | ISO-код, обновляется при логине |
+| `device_fingerprint` | TEXT | NULL | — | хэш user-agent + canvas + ... |
+| `is_blocked` | BOOLEAN | NOT NULL | `false` | Бан (доступ закрыт) |
+| `block_reason` | TEXT | NULL | — | Причина бана для аудита |
+| `blocked_at` | TIMESTAMPTZ | NULL | — | Когда заблокирован |
+| `is_admin` | BOOLEAN | NOT NULL | `false` | Доступ к админке |
+| `referrer_user_id` | BIGINT | NULL | — | Кто пригласил |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | Обновляется триггером |
+| `last_seen_at` | TIMESTAMPTZ | NULL | — | Для DAU расчёта |
+
+**Constraints:**
+```sql
+ALTER TABLE users
+  ADD CONSTRAINT uq_users_telegram_id UNIQUE (telegram_id),
+  ADD CONSTRAINT ck_users_locale CHECK (locale IN ('ru','en','es','pt','zh','ar')),
+  ADD CONSTRAINT fk_users_referrer FOREIGN KEY (referrer_user_id) REFERENCES users(id);
+```
+
+**Индексы:**
+```sql
+CREATE INDEX ix_users_telegram_id ON users(telegram_id);
+CREATE INDEX ix_users_last_seen_at ON users(last_seen_at) WHERE NOT is_blocked;
+CREATE INDEX ix_users_referrer ON users(referrer_user_id) WHERE referrer_user_id IS NOT NULL;
+CREATE INDEX ix_users_admin ON users(id) WHERE is_admin;
+```
+
+**Триггеры:** `updated_at` (см. раздел 12).
+
+### 3.2 `user_security`
+
+Чувствительные операции отдельно — для удобства реверса прав, аудита, и потенциально другого backup-расписания.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `user_id` | BIGINT | NOT NULL | — | PK + FK |
+| `withdrawal_2fa_enabled` | BOOLEAN | NOT NULL | `true` | 2FA через бота |
+| `withdrawal_pin_hash` | TEXT | NULL | — | bcrypt-хеш PIN'а (опц.) |
+| `failed_2fa_count` | INT | NOT NULL | `0` | Счётчик попыток |
+| `last_2fa_attempt_at` | TIMESTAMPTZ | NULL | — | |
+| `kyc_level` | TEXT | NOT NULL | `'none'` | none / soft / full |
+| `kyc_verified_at` | TIMESTAMPTZ | NULL | — | |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE user_security
+  ADD CONSTRAINT pk_user_security PRIMARY KEY (user_id),
+  ADD CONSTRAINT fk_user_security_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT ck_user_security_kyc CHECK (kyc_level IN ('none','soft','full'));
+```
+
+### 3.3 `referrals`
+
+Реферальная программа. Учитывает только подтверждённых рефералов (прошли tutorial).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `referrer_user_id` | BIGINT | NOT NULL | — | Кто пригласил |
+| `referred_user_id` | BIGINT | NOT NULL | — | Кого пригласили |
+| `confirmed_at` | TIMESTAMPTZ | NULL | — | Когда реферал прошёл tutorial |
+| `bonus_paid_gold` | BIGINT | NOT NULL | `0` | Сколько уже выплачено за этого |
+| `expires_at` | TIMESTAMPTZ | NOT NULL | — | Окно начислений (30 дней) |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE referrals
+  ADD CONSTRAINT uq_referrals_referred UNIQUE (referred_user_id),
+  ADD CONSTRAINT fk_referrals_referrer FOREIGN KEY (referrer_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_referrals_referred FOREIGN KEY (referred_user_id) REFERENCES users(id);
+
+CREATE INDEX ix_referrals_referrer_active ON referrals(referrer_user_id, expires_at)
+  WHERE confirmed_at IS NOT NULL;
+```
+
+---
+
+## 4. Таблицы — Game character
+
+### 4.1 `characters`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NOT NULL | — | Владелец |
+| `class` | TEXT | NOT NULL | — | knight / archer / necromancer |
+| `name` | TEXT | NOT NULL | — | Игровое имя, 3–20 символов |
+| `level` | INT | NOT NULL | `1` | 1..60 в MVP |
+| `xp` | BIGINT | NOT NULL | `0` | Накопленный опыт |
+| `unspent_stat_points` | INT | NOT NULL | `0` | Очки на STR/DEX/INT |
+| `unspent_skill_points` | INT | NOT NULL | `0` | Очки на пассивки |
+| `base_stats` | JSONB | NOT NULL | `'{"str":10,"dex":5,"int":3}'` | Распределённые очки |
+| `passives` | JSONB | NOT NULL | `'[]'` | `["passive_id_1","passive_id_2"]` |
+| `active_skills` | JSONB | NOT NULL | `'[]'` | 4 ID скиллов в hotbar |
+| `total_playtime_seconds` | BIGINT | NOT NULL | `0` | Накопительно |
+| `is_blocked` | BOOLEAN | NOT NULL | `false` | Например, читер-флаг |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `deleted_at` | TIMESTAMPTZ | NULL | — | Soft delete (опц., потом) |
+
+**Constraints:**
+```sql
+ALTER TABLE characters
+  ADD CONSTRAINT fk_characters_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT ck_characters_class CHECK (class IN ('knight','archer','necromancer')),
+  ADD CONSTRAINT ck_characters_level CHECK (level BETWEEN 1 AND 100),
+  ADD CONSTRAINT ck_characters_xp CHECK (xp >= 0),
+  ADD CONSTRAINT ck_characters_name_len CHECK (char_length(name) BETWEEN 3 AND 20);
+
+-- В MVP: один персонаж определённого класса на юзера
+CREATE UNIQUE INDEX uq_characters_user_class ON characters(user_id, class) WHERE deleted_at IS NULL;
+```
+
+**Индексы:**
+```sql
+CREATE INDEX ix_characters_user ON characters(user_id) WHERE deleted_at IS NULL;
+CREATE INDEX ix_characters_level ON characters(level) WHERE NOT is_blocked AND deleted_at IS NULL;
+```
+
+**Заметка про `base_stats` / `passives` / `active_skills` JSONB:** хранение в JSON, а не отдельных таблицах — осознанное решение для MVP. Чтение всегда вместе с character, изменения нечастые. Если в v2 потребуется аналитика по выбору пассивок — выделим в отдельную таблицу.
+
+---
+
+## 5. Таблицы — Economy & Currency
+
+### 5.1 `balances`
+
+Состоит отдельно от `users` потому что обновляется намного чаще и потенциально шардится по разным правилам.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `user_id` | BIGINT | NOT NULL | — | PK + FK |
+| `gold` | BIGINT | NOT NULL | `0` | "Копейки" (1 UI gold = 1000) |
+| `gold_locked` | BIGINT | NOT NULL | `0` | В эскроу маркета / withdrawal pending |
+| `energy` | INT | NOT NULL | `100` | 0..energy_cap |
+| `energy_cap` | INT | NOT NULL | `100` | Может расти от пассивок |
+| `energy_updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | Для регенерации |
+| `shards` | BIGINT | NOT NULL | `0` | Крафт-валюта |
+| `korona` | INT | NOT NULL | `0` | Премиум, не «копейки» |
+| `wotk_pending` | BIGINT | NOT NULL | `0` | Зарезервировано под выводы (ставится при request) |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE balances
+  ADD CONSTRAINT pk_balances PRIMARY KEY (user_id),
+  ADD CONSTRAINT fk_balances_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT ck_balances_gold_nonneg CHECK (gold >= 0),
+  ADD CONSTRAINT ck_balances_gold_locked_nonneg CHECK (gold_locked >= 0 AND gold_locked <= gold),
+  ADD CONSTRAINT ck_balances_energy CHECK (energy >= 0 AND energy <= energy_cap),
+  ADD CONSTRAINT ck_balances_shards_nonneg CHECK (shards >= 0),
+  ADD CONSTRAINT ck_balances_korona_nonneg CHECK (korona >= 0),
+  ADD CONSTRAINT ck_balances_wotk_pending_nonneg CHECK (wotk_pending >= 0);
+```
+
+**Триггеры:** `updated_at` + проверка инвариантов через CHECK.
+
+**Регенерация энергии** — не триггером, а функцией `regen_energy_for_user(uid)`, вызываемой при чтении баланса в API (lazy regen). См. раздел 13.
+
+### 5.2 `transactions`
+
+Главная таблица аудита **всех** движений валют. Каждое изменение баланса = запись здесь.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NOT NULL | — | Кто |
+| `type` | TEXT | NOT NULL | — | DUNGEON_ENTRY / DUNGEON_REWARD / WITHDRAW / DEPOSIT / MARKET_BUY / ... |
+| `amount` | BIGINT | NOT NULL | — | Может быть отрицательным |
+| `currency` | TEXT | NOT NULL | — | GOLD / WOTK / KORONA / SHARDS / ENERGY |
+| `balance_after` | BIGINT | NOT NULL | — | Состояние после операции |
+| `ref` | JSONB | NULL | — | `{run_id,item_id,tx_hash,...}` |
+| `idempotency_key` | TEXT | NULL | — | UUID, может быть NULL для системных |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE transactions
+  ADD CONSTRAINT fk_transactions_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT ck_transactions_type CHECK (type IN (
+    'DUNGEON_ENTRY','DUNGEON_REWARD','DUNGEON_REVIVE',
+    'PVP_BET','PVP_REWARD','PVP_FEE',
+    'MARKET_LIST_FEE','MARKET_BUY','MARKET_SELL','MARKET_FEE',
+    'SHOP_BUY','SHOP_SELL','SHOP_REROLL','SHOP_SALVAGE',
+    'DEPOSIT','WITHDRAW','WITHDRAW_REFUND',
+    'DAILY_REWARD','REFERRAL_BONUS','AIRDROP',
+    'KORONA_PURCHASE','ENERGY_PURCHASE','ADMIN_ADJUST'
+  )),
+  ADD CONSTRAINT ck_transactions_currency CHECK (currency IN ('GOLD','WOTK','KORONA','SHARDS','ENERGY')),
+  ADD CONSTRAINT uq_transactions_idempotency UNIQUE (idempotency_key);
+```
+
+**Индексы:**
+```sql
+CREATE INDEX ix_transactions_user_created ON transactions(user_id, created_at DESC);
+CREATE INDEX ix_transactions_type_created ON transactions(type, created_at DESC);
+CREATE INDEX ix_transactions_ref_run ON transactions((ref->>'run_id')) WHERE ref ? 'run_id';
+```
+
+**Партиционирование:** по месяцу (`PARTITION BY RANGE (created_at)`). Таблица растёт быстро, при 100k DAU = миллионы записей в день. См. раздел 14.
+
+---
+
+## 6. Таблицы — Items & Inventory
+
+### 6.1 `item_bases` (reference)
+
+Статичный каталог базовых типов предметов. Заполняется через seeds, обновляется миграциями.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | TEXT | NOT NULL | — | PK, slug-стиль: `sword_2h_iron` |
+| `slot` | TEXT | NOT NULL | — | helmet/chest/weapon/offhand/boots/ring |
+| `kind` | TEXT | NOT NULL | — | sword_1h, axe_2h, bow, etc. |
+| `name_key` | TEXT | NOT NULL | — | i18n ключ |
+| `min_ilvl` | INT | NOT NULL | `1` | С какого уровня может выпасть |
+| `max_ilvl` | INT | NOT NULL | `60` | До какого |
+| `base_stats` | JSONB | NOT NULL | — | `{"min_dmg":10,"max_dmg":15,"as":1.0}` |
+| `allowed_classes` | JSONB | NOT NULL | `'["knight","archer","necromancer"]'` | Какие классы могут носить |
+| `is_two_handed` | BOOLEAN | NOT NULL | `false` | Только для weapon |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE item_bases
+  ADD CONSTRAINT pk_item_bases PRIMARY KEY (id),
+  ADD CONSTRAINT ck_item_bases_slot CHECK (slot IN ('helmet','chest','weapon','offhand','boots','ring'));
+
+CREATE INDEX ix_item_bases_slot_kind ON item_bases(slot, kind);
+```
+
+### 6.2 `affix_definitions` (reference)
+
+Список всех возможных аффиксов для генерации предметов.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | TEXT | NOT NULL | — | PK, slug: `prefix_str_t1` |
+| `affix_type` | TEXT | NOT NULL | — | prefix / suffix / implicit |
+| `name_key` | TEXT | NOT NULL | — | i18n ключ |
+| `min_ilvl` | INT | NOT NULL | `1` | На каком ilvl может появиться |
+| `tier` | INT | NOT NULL | `1` | T1 (низкий) → T5 (высокий) |
+| `weight` | INT | NOT NULL | `100` | Для weighted random |
+| `applicable_slots` | JSONB | NOT NULL | — | `["weapon","helmet"]` |
+| `mod_type` | TEXT | NOT NULL | — | `flat_str`, `pct_atk`, `flat_hp`, etc. |
+| `value_min` | INT | NOT NULL | — | Нижняя граница ролла |
+| `value_max` | INT | NOT NULL | — | Верхняя граница ролла |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE affix_definitions
+  ADD CONSTRAINT pk_affix_definitions PRIMARY KEY (id),
+  ADD CONSTRAINT ck_affix_type CHECK (affix_type IN ('prefix','suffix','implicit')),
+  ADD CONSTRAINT ck_affix_value_range CHECK (value_min <= value_max),
+  ADD CONSTRAINT ck_affix_tier CHECK (tier BETWEEN 1 AND 10);
+
+CREATE INDEX ix_affix_def_type_ilvl ON affix_definitions(affix_type, min_ilvl);
+```
+
+### 6.3 `items`
+
+Все предметы юзеров. Каждая запись = уникальный предмет.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `owner_user_id` | BIGINT | NOT NULL | — | Текущий владелец |
+| `base_id` | TEXT | NOT NULL | — | FK item_bases.id |
+| `rarity` | TEXT | NOT NULL | — | common/magic/rare/epic/legendary |
+| `ilvl` | INT | NOT NULL | — | Уровень при дропе |
+| `affixes` | JSONB | NOT NULL | `'[]'` | `[{"id":"prefix_str_t2","value":15}]` |
+| `equipped_on` | BIGINT | NULL | — | character_id если надет |
+| `equipped_slot` | TEXT | NULL | — | helmet/chest/... только если equipped_on |
+| `inventory_position` | INT | NULL | — | 0..47 если в bag (NULL если equipped или в любом эскроу) |
+| `is_in_market_escrow` | BOOLEAN | NOT NULL | `false` | Выставлен на маркете (v1) |
+| `escrow_run_id` | UUID | NULL | — | Поднят в этом активном ране, ещё не claimed (см. RUN-LIFECYCLE.md) |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+**Constraints:**
+```sql
+ALTER TABLE items
+  ADD CONSTRAINT fk_items_user FOREIGN KEY (owner_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_items_base FOREIGN KEY (base_id) REFERENCES item_bases(id),
+  ADD CONSTRAINT fk_items_character FOREIGN KEY (equipped_on) REFERENCES characters(id),
+  ADD CONSTRAINT fk_items_escrow_run FOREIGN KEY (escrow_run_id) REFERENCES dungeon_runs(id),
+  ADD CONSTRAINT ck_items_rarity CHECK (rarity IN ('common','magic','rare','epic','legendary')),
+  ADD CONSTRAINT ck_items_position CHECK (inventory_position IS NULL OR inventory_position BETWEEN 0 AND 47),
+  ADD CONSTRAINT ck_items_equipped_slot CHECK (equipped_slot IN ('helmet','chest','weapon','offhand','boots','ring')),
+  -- Предмет в одном из 4 состояний: на персонаже / в инвентаре / в маркет-эскроу / в run-эскроу
+  ADD CONSTRAINT ck_items_state CHECK (
+    (equipped_on IS NOT NULL AND equipped_slot IS NOT NULL AND inventory_position IS NULL AND NOT is_in_market_escrow AND escrow_run_id IS NULL) OR
+    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NOT NULL AND NOT is_in_market_escrow AND escrow_run_id IS NULL) OR
+    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NULL AND is_in_market_escrow AND escrow_run_id IS NULL) OR
+    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NULL AND NOT is_in_market_escrow AND escrow_run_id IS NOT NULL)
+  );
+
+-- Один предмет на слот персонажа
+CREATE UNIQUE INDEX uq_items_equipment_slot ON items(equipped_on, equipped_slot)
+  WHERE equipped_on IS NOT NULL;
+
+-- Один предмет на ячейку инвентаря
+CREATE UNIQUE INDEX uq_items_inventory_position ON items(owner_user_id, inventory_position)
+  WHERE inventory_position IS NOT NULL;
+```
+
+**Семантика состояний:**
+- **equipped** — надет на персонажа, занимает слот
+- **inventory** — в сумке, занимает ячейку 0..47
+- **market escrow** (v1) — выставлен на маркете, hold системы
+- **run escrow** — поднят игроком в текущем активном ране, материализован в БД, но ещё не доступен в инвентаре до `claim`. Если ран ABANDONED/FLED/FAILED — судьба определяется политикой:
+  - COMPLETED → SETTLED: переходит в inventory или продаётся автоматически если нет места
+  - FLED: остаётся в run escrow до claim, потом → inventory
+  - FAILED: 50% по броску RNG (по балансу) → inventory, остальное удаляется
+  - ABANDONED: cron политика — 50% удаляется, 50% → inventory с уведомлением
+
+**Индексы:**
+```sql
+CREATE INDEX ix_items_owner ON items(owner_user_id)
+  WHERE NOT is_in_market_escrow AND escrow_run_id IS NULL;
+CREATE INDEX ix_items_owner_equipped ON items(owner_user_id, equipped_on) WHERE equipped_on IS NOT NULL;
+CREATE INDEX ix_items_rarity ON items(rarity);
+-- Все предметы текущего рана (для claim/cleanup)
+CREATE INDEX ix_items_escrow_run ON items(escrow_run_id) WHERE escrow_run_id IS NOT NULL;
+-- GIN для поиска по аффиксам (для маркета)
+CREATE INDEX ix_items_affixes_gin ON items USING gin(affixes jsonb_path_ops);
+```
+
+---
+
+## 7. Таблицы — Wallet & TON
+
+### 7.1 `wallets`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `user_id` | BIGINT | NOT NULL | — | PK + FK |
+| `internal_ton_address` | TEXT | NOT NULL | — | Сгенерированный sub-address для депозитов |
+| `internal_derivation_path` | TEXT | NOT NULL | — | BIP-44 path: `m/44'/607'/<user_id>'` |
+| `external_ton_address` | TEXT | NULL | — | Куда юзер выводит |
+| `external_address_set_at` | TIMESTAMPTZ | NULL | — | Кулдаун на смену (24h) |
+| `external_address_verified_at` | TIMESTAMPTZ | NULL | — | TonConnect proof received |
+| `total_deposited_wotk` | BIGINT | NOT NULL | `0` | Кумулятивно |
+| `total_withdrawn_wotk` | BIGINT | NOT NULL | `0` | Кумулятивно |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE wallets
+  ADD CONSTRAINT pk_wallets PRIMARY KEY (user_id),
+  ADD CONSTRAINT fk_wallets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT uq_wallets_internal_address UNIQUE (internal_ton_address);
+
+CREATE INDEX ix_wallets_internal_address ON wallets(internal_ton_address);
+```
+
+### 7.2 `deposits`
+
+Входящие транзакции (TON → game gold).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NOT NULL | — | Кому зачисление |
+| `tx_hash` | TEXT | NOT NULL | — | Уникальный onchain hash |
+| `from_address` | TEXT | NOT NULL | — | Откуда пришли |
+| `to_address` | TEXT | NOT NULL | — | Внутренний адрес юзера |
+| `amount_wotk` | BIGINT | NOT NULL | — | Сумма jetton'ов |
+| `block_seqno` | BIGINT | NOT NULL | — | TON block |
+| `lt` | BIGINT | NOT NULL | — | Logical time (для ordering) |
+| `credited_gold` | BIGINT | NULL | — | Сколько gold зачислено (по курсу на момент) |
+| `exchange_rate` | NUMERIC(20, 8) | NULL | — | gold/WOTK на момент зачисления |
+| `status` | TEXT | NOT NULL | `'DETECTED'` | DETECTED → CONFIRMED → CREDITED → FAILED |
+| `failure_reason` | TEXT | NULL | — | Если FAILED |
+| `detected_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `confirmed_at` | TIMESTAMPTZ | NULL | — | После N подтверждений |
+| `credited_at` | TIMESTAMPTZ | NULL | — | Когда зачислено в gold |
+
+```sql
+ALTER TABLE deposits
+  ADD CONSTRAINT fk_deposits_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT uq_deposits_tx_hash UNIQUE (tx_hash),
+  ADD CONSTRAINT ck_deposits_status CHECK (status IN ('DETECTED','CONFIRMED','CREDITED','FAILED')),
+  ADD CONSTRAINT ck_deposits_amount_pos CHECK (amount_wotk > 0);
+
+CREATE INDEX ix_deposits_user_created ON deposits(user_id, detected_at DESC);
+CREATE INDEX ix_deposits_status ON deposits(status, detected_at) WHERE status != 'CREDITED';
+CREATE INDEX ix_deposits_to_address ON deposits(to_address);
+```
+
+### 7.3 `withdrawals`
+
+Исходящие транзакции (game gold → TON).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NOT NULL | — | Инициатор |
+| `to_address` | TEXT | NOT NULL | — | Куда выводить |
+| `gold_debited` | BIGINT | NOT NULL | — | Сколько gold списано |
+| `amount_wotk` | BIGINT | NOT NULL | — | Сколько WOTK к отправке |
+| `exchange_rate` | NUMERIC(20, 8) | NOT NULL | — | На момент создания |
+| `status` | TEXT | NOT NULL | `'PENDING'` | PENDING → AWAITING_2FA → PROCESSING → SENT → CONFIRMED → FAILED → REFUNDED |
+| `tfa_code_hash` | TEXT | NULL | — | bcrypt от 6-значного кода |
+| `tfa_attempts` | INT | NOT NULL | `0` | |
+| `tfa_expires_at` | TIMESTAMPTZ | NULL | — | TTL ~10 мин |
+| `tx_hash` | TEXT | NULL | — | Onchain после SENT |
+| `failure_reason` | TEXT | NULL | — | |
+| `retry_count` | INT | NOT NULL | `0` | Для idempotent ретраев |
+| `idempotency_key` | TEXT | NULL | — | UUID от клиента |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `confirmed_at` | TIMESTAMPTZ | NULL | — | |
+
+```sql
+ALTER TABLE withdrawals
+  ADD CONSTRAINT fk_withdrawals_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT uq_withdrawals_idempotency UNIQUE (idempotency_key),
+  ADD CONSTRAINT uq_withdrawals_tx_hash UNIQUE (tx_hash),
+  ADD CONSTRAINT ck_withdrawals_status CHECK (status IN ('PENDING','AWAITING_2FA','PROCESSING','SENT','CONFIRMED','FAILED','REFUNDED')),
+  ADD CONSTRAINT ck_withdrawals_amount_pos CHECK (amount_wotk > 0);
+
+CREATE INDEX ix_withdrawals_user_created ON withdrawals(user_id, created_at DESC);
+-- Партиальный индекс под очередь обработки
+CREATE INDEX ix_withdrawals_pending ON withdrawals(created_at) WHERE status IN ('PENDING','PROCESSING');
+CREATE INDEX ix_withdrawals_status ON withdrawals(status, updated_at);
+```
+
+### 7.4 `treasury_log`
+
+Аудит операций с горячим/холодным кошельком (rebalance, manual).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `action` | TEXT | NOT NULL | — | HOT_TO_COLD / COLD_TO_HOT / MANUAL_PAYOUT / RECONCILE_MISMATCH |
+| `amount_wotk` | BIGINT | NOT NULL | — | Может быть отрицательным |
+| `hot_balance_after` | BIGINT | NOT NULL | — | Снепшот для аудита |
+| `cold_balance_after` | BIGINT | NOT NULL | — | Снепшот для аудита |
+| `db_total_gold_value` | BIGINT | NOT NULL | — | Сумма всех balances.gold |
+| `tx_hash` | TEXT | NULL | — | Onchain если применимо |
+| `withdrawal_id` | BIGINT | NULL | — | FK если связан с выводом |
+| `deposit_id` | BIGINT | NULL | — | FK если связан с депозитом |
+| `initiated_by` | TEXT | NOT NULL | — | system_cron / admin:<user_id> |
+| `note` | TEXT | NULL | — | |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE treasury_log
+  ADD CONSTRAINT fk_treasury_withdrawal FOREIGN KEY (withdrawal_id) REFERENCES withdrawals(id),
+  ADD CONSTRAINT fk_treasury_deposit FOREIGN KEY (deposit_id) REFERENCES deposits(id),
+  ADD CONSTRAINT ck_treasury_action CHECK (action IN (
+    'HOT_TO_COLD','COLD_TO_HOT','MANUAL_PAYOUT','RECONCILE_MISMATCH','REBALANCE','EMERGENCY_PAUSE'
+  ));
+
+CREATE INDEX ix_treasury_log_created ON treasury_log(created_at DESC);
+CREATE INDEX ix_treasury_log_action ON treasury_log(action, created_at DESC);
+```
+
+---
+
+## 8. Таблицы — Dungeons & Combat
+
+### 8.1 `dungeons` (reference)
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | TEXT | NOT NULL | — | PK: `crypt_normal`, `crypt_hard`, ... |
+| `name_key` | TEXT | NOT NULL | — | i18n ключ |
+| `theme` | TEXT | NOT NULL | — | crypt / forest / castle |
+| `difficulty` | TEXT | NOT NULL | — | normal / hard / mythic |
+| `min_level` | INT | NOT NULL | `1` | |
+| `entry_cost_gold` | BIGINT | NOT NULL | — | В "копейках" |
+| `entry_cost_energy` | INT | NOT NULL | `10` | |
+| `daily_limit` | INT | NOT NULL | `5` | Входов в сутки |
+| `floors_count` | INT | NOT NULL | `5` | Включая босса |
+| `config` | JSONB | NOT NULL | — | Полная конфигурация: floors, encounters, loot tables, boss |
+| `xp_base` | INT | NOT NULL | — | Базовый XP за прохождение |
+| `gold_base` | BIGINT | NOT NULL | — | Базовая награда |
+| `is_enabled` | BOOLEAN | NOT NULL | `true` | Чтобы выключать без миграций |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE dungeons
+  ADD CONSTRAINT pk_dungeons PRIMARY KEY (id),
+  ADD CONSTRAINT ck_dungeons_theme CHECK (theme IN ('crypt','forest','castle','tower','swamp')),
+  ADD CONSTRAINT ck_dungeons_difficulty CHECK (difficulty IN ('normal','hard','mythic'));
+
+CREATE INDEX ix_dungeons_enabled ON dungeons(is_enabled, min_level);
+```
+
+### 8.2 `dungeon_runs`
+
+Главная таблица активных и завершённых ранов. Подробный жизненный цикл и failure-сценарии описаны в [RUN-LIFECYCLE.md](RUN-LIFECYCLE.md).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | UUID | NOT NULL | `gen_random_uuid()` | PK |
+| `user_id` | BIGINT | NOT NULL | — | |
+| `character_id` | BIGINT | NOT NULL | — | |
+| `dungeon_id` | TEXT | NOT NULL | — | FK |
+| `seed` | BYTEA | NOT NULL | — | 32 байта, фиксирует RNG (для replay при reconnect) |
+| `status` | TEXT | NOT NULL | `'IN_PROGRESS'` | См. state machine ниже |
+| `current_floor` | INT | NOT NULL | `0` | Последний завершённый этаж (0 = ещё на 1-м) |
+| `character_state` | JSONB | NOT NULL | — | Снимок персонажа на момент **входа в текущий этаж** (HP, mana, бафы). Обновляется при floor transition checkpoint. Используется для recovery после disconnect > grace. |
+| `pending_gold` | BIGINT | NOT NULL | `0` | Накопленное золото с пройденных этажей. Лут материализуется в `items` сразу при pickup (не здесь). |
+| `entry_paid_gold` | BIGINT | NOT NULL | — | Сколько списали при входе |
+| `entry_paid_energy` | INT | NOT NULL | — | |
+| `revives_used` | INT | NOT NULL | `0` | Сколько раз воскресал |
+| `revives_paid_korona` | INT | NOT NULL | `0` | Кумулятивно |
+| `realtime_node_id` | TEXT | NULL | — | На каком Colyseus-инстансе ран сейчас живёт (sticky routing при scale-out) |
+| `started_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `last_activity_at` | TIMESTAMPTZ | NOT NULL | `now()` | Обновляется на каждый floor transition |
+| `last_checkpoint_at` | TIMESTAMPTZ | NOT NULL | `now()` | Когда был последний successful checkpoint |
+| `finished_at` | TIMESTAMPTZ | NULL | — | |
+| `expires_at` | TIMESTAMPTZ | NOT NULL | — | now() + 24h, для cleanup_expired_runs cron |
+
+```sql
+ALTER TABLE dungeon_runs
+  ADD CONSTRAINT fk_runs_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_runs_character FOREIGN KEY (character_id) REFERENCES characters(id),
+  ADD CONSTRAINT fk_runs_dungeon FOREIGN KEY (dungeon_id) REFERENCES dungeons(id),
+  ADD CONSTRAINT ck_runs_status CHECK (status IN (
+    'IN_PROGRESS','COMPLETED','FAILED','FLED','ABANDONED','SETTLED'
+  )),
+  ADD CONSTRAINT ck_runs_floor_nonneg CHECK (current_floor >= 0);
+
+-- Только один активный run на персонаже
+CREATE UNIQUE INDEX uq_runs_one_active_per_char ON dungeon_runs(character_id)
+  WHERE status = 'IN_PROGRESS';
+
+CREATE INDEX ix_runs_user_started ON dungeon_runs(user_id, started_at DESC);
+CREATE INDEX ix_runs_status_expires ON dungeon_runs(status, expires_at)
+  WHERE status = 'IN_PROGRESS';
+CREATE INDEX ix_runs_dungeon_status ON dungeon_runs(dungeon_id, status);
+```
+
+**Партиционирование:** по месяцу `started_at` после MVP (когда таблица перевалит 10M+ строк).
+
+### 8.3 `run_encounters`
+
+Лог боёв в ране для replay-аудита.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `run_id` | UUID | NOT NULL | — | FK |
+| `floor` | INT | NOT NULL | — | |
+| `encounter_idx` | INT | NOT NULL | — | Внутри этажа |
+| `enemies_spawned` | JSONB | NOT NULL | — | Snapshot мобов |
+| `combat_summary` | JSONB | NOT NULL | — | `{damage_dealt,damage_taken,duration_s,deaths}` |
+| `loot_rolled` | JSONB | NOT NULL | `'[]'` | Что упало |
+| `gold_rolled` | BIGINT | NOT NULL | `0` | |
+| `result` | TEXT | NOT NULL | — | win / loss / fled |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE run_encounters
+  ADD CONSTRAINT fk_encounters_run FOREIGN KEY (run_id) REFERENCES dungeon_runs(id) ON DELETE CASCADE,
+  ADD CONSTRAINT uq_encounters_run_floor_idx UNIQUE (run_id, floor, encounter_idx),
+  ADD CONSTRAINT ck_encounters_result CHECK (result IN ('win','loss','fled'));
+
+CREATE INDEX ix_encounters_run ON run_encounters(run_id);
+```
+
+**Партиционирование:** по месяцу `created_at`. Это самая большая таблица в long-term.
+
+### 8.4 `daily_dungeon_entries`
+
+Учёт лимитов входов в сутки.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `user_id` | BIGINT | NOT NULL | — | |
+| `dungeon_id` | TEXT | NOT NULL | — | |
+| `date_utc` | DATE | NOT NULL | — | UTC-день |
+| `count` | INT | NOT NULL | `0` | Сколько входов сегодня |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE daily_dungeon_entries
+  ADD CONSTRAINT pk_daily_entries PRIMARY KEY (user_id, dungeon_id, date_utc),
+  ADD CONSTRAINT fk_daily_entries_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT fk_daily_entries_dungeon FOREIGN KEY (dungeon_id) REFERENCES dungeons(id);
+
+CREATE INDEX ix_daily_entries_date ON daily_dungeon_entries(date_utc);
+-- Cleanup старше 30 дней (cron)
+```
+
+### 8.5 `campaign_progress`
+
+Прогрессия кампании на персонажа.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `character_id` | BIGINT | NOT NULL | — | |
+| `act` | INT | NOT NULL | — | 1, 2, 3 |
+| `location` | INT | NOT NULL | — | 1..5 в акте |
+| `first_completed_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `best_clear_time_s` | INT | NULL | — | Для персональных рекордов |
+| `completion_count` | INT | NOT NULL | `1` | Сколько раз прошёл |
+
+```sql
+ALTER TABLE campaign_progress
+  ADD CONSTRAINT pk_campaign_progress PRIMARY KEY (character_id, act, location),
+  ADD CONSTRAINT fk_campaign_character FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE,
+  ADD CONSTRAINT ck_campaign_act CHECK (act BETWEEN 1 AND 5),
+  ADD CONSTRAINT ck_campaign_loc CHECK (location BETWEEN 1 AND 10);
+```
+
+---
+
+## 9. Таблицы — Marketplace (v1.0)
+
+### 9.1 `market_listings`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `seller_user_id` | BIGINT | NOT NULL | — | |
+| `item_id` | BIGINT | NOT NULL | — | FK; на момент листинга `is_in_market_escrow=true` |
+| `price_gold` | BIGINT | NOT NULL | — | "Копейки" |
+| `expires_at` | TIMESTAMPTZ | NOT NULL | — | now() + duration |
+| `status` | TEXT | NOT NULL | `'ACTIVE'` | ACTIVE / SOLD / EXPIRED / CANCELLED |
+| `listed_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `closed_at` | TIMESTAMPTZ | NULL | — | |
+
+```sql
+ALTER TABLE market_listings
+  ADD CONSTRAINT fk_listings_seller FOREIGN KEY (seller_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_listings_item FOREIGN KEY (item_id) REFERENCES items(id),
+  ADD CONSTRAINT ck_listings_status CHECK (status IN ('ACTIVE','SOLD','EXPIRED','CANCELLED')),
+  ADD CONSTRAINT ck_listings_price_pos CHECK (price_gold > 0);
+
+-- Один активный листинг на предмет
+CREATE UNIQUE INDEX uq_listings_one_active_per_item ON market_listings(item_id)
+  WHERE status = 'ACTIVE';
+
+-- Hot path: поиск активных листингов
+CREATE INDEX ix_listings_active_price ON market_listings(price_gold)
+  WHERE status = 'ACTIVE';
+CREATE INDEX ix_listings_seller ON market_listings(seller_user_id, listed_at DESC);
+CREATE INDEX ix_listings_expiry ON market_listings(expires_at)
+  WHERE status = 'ACTIVE';
+```
+
+### 9.2 `market_sales`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `listing_id` | BIGINT | NOT NULL | — | FK |
+| `seller_user_id` | BIGINT | NOT NULL | — | Денормализация для скорости |
+| `buyer_user_id` | BIGINT | NOT NULL | — | |
+| `item_id` | BIGINT | NOT NULL | — | |
+| `item_snapshot` | JSONB | NOT NULL | — | Полный snapshot предмета на момент продажи (для аналитики) |
+| `price_gold` | BIGINT | NOT NULL | — | |
+| `fee_gold` | BIGINT | NOT NULL | — | Комиссия маркета |
+| `seller_received_gold` | BIGINT | NOT NULL | — | price - fee |
+| `sold_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE market_sales
+  ADD CONSTRAINT fk_sales_listing FOREIGN KEY (listing_id) REFERENCES market_listings(id),
+  ADD CONSTRAINT fk_sales_seller FOREIGN KEY (seller_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_sales_buyer FOREIGN KEY (buyer_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_sales_item FOREIGN KEY (item_id) REFERENCES items(id);
+
+CREATE INDEX ix_sales_seller_sold ON market_sales(seller_user_id, sold_at DESC);
+CREATE INDEX ix_sales_buyer_sold ON market_sales(buyer_user_id, sold_at DESC);
+CREATE INDEX ix_sales_sold_at ON market_sales(sold_at DESC);
+-- Для аналитики цен по типу
+CREATE INDEX ix_sales_item_snapshot_base ON market_sales((item_snapshot->>'base_id'));
+```
+
+---
+
+## 10. Таблицы — PvP (v1.1)
+
+### 10.1 `pvp_seasons`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | INT | NOT NULL | — | PK: 1, 2, 3, ... |
+| `name_key` | TEXT | NOT NULL | — | i18n |
+| `starts_at` | TIMESTAMPTZ | NOT NULL | — | |
+| `ends_at` | TIMESTAMPTZ | NOT NULL | — | |
+| `status` | TEXT | NOT NULL | `'UPCOMING'` | UPCOMING / ACTIVE / ENDED |
+| `rewards_config` | JSONB | NOT NULL | — | Награды по тиерам |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE pvp_seasons
+  ADD CONSTRAINT pk_pvp_seasons PRIMARY KEY (id),
+  ADD CONSTRAINT ck_pvp_season_status CHECK (status IN ('UPCOMING','ACTIVE','ENDED'));
+
+CREATE INDEX ix_pvp_seasons_status ON pvp_seasons(status);
+```
+
+### 10.2 `pvp_matches`
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | UUID | NOT NULL | `gen_random_uuid()` | PK |
+| `season_id` | INT | NOT NULL | — | FK |
+| `player1_user_id` | BIGINT | NOT NULL | — | |
+| `player1_character_id` | BIGINT | NOT NULL | — | |
+| `player1_elo_before` | INT | NOT NULL | — | |
+| `player1_elo_after` | INT | NOT NULL | — | |
+| `player2_user_id` | BIGINT | NOT NULL | — | |
+| `player2_character_id` | BIGINT | NOT NULL | — | |
+| `player2_elo_before` | INT | NOT NULL | — | |
+| `player2_elo_after` | INT | NOT NULL | — | |
+| `bet_gold` | BIGINT | NOT NULL | — | На каждого |
+| `pot_gold` | BIGINT | NOT NULL | — | bet × 2 - fee |
+| `fee_gold` | BIGINT | NOT NULL | — | |
+| `winner_user_id` | BIGINT | NULL | — | NULL если ничья (timeout) |
+| `duration_s` | INT | NOT NULL | — | |
+| `combat_summary` | JSONB | NOT NULL | — | Replay-friendly |
+| `played_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE pvp_matches
+  ADD CONSTRAINT fk_pvp_season FOREIGN KEY (season_id) REFERENCES pvp_seasons(id),
+  ADD CONSTRAINT fk_pvp_p1 FOREIGN KEY (player1_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_pvp_p2 FOREIGN KEY (player2_user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_pvp_winner FOREIGN KEY (winner_user_id) REFERENCES users(id),
+  ADD CONSTRAINT ck_pvp_distinct_players CHECK (player1_user_id != player2_user_id);
+
+CREATE INDEX ix_pvp_p1_played ON pvp_matches(player1_user_id, played_at DESC);
+CREATE INDEX ix_pvp_p2_played ON pvp_matches(player2_user_id, played_at DESC);
+CREATE INDEX ix_pvp_season_played ON pvp_matches(season_id, played_at DESC);
+```
+
+### 10.3 `pvp_player_stats`
+
+Денормализованный счётчик для leaderboard (быстрее, чем агрегировать по `pvp_matches`).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `season_id` | INT | NOT NULL | — | |
+| `user_id` | BIGINT | NOT NULL | — | |
+| `character_id` | BIGINT | NOT NULL | — | |
+| `elo` | INT | NOT NULL | `1000` | Текущий рейтинг |
+| `wins` | INT | NOT NULL | `0` | |
+| `losses` | INT | NOT NULL | `0` | |
+| `draws` | INT | NOT NULL | `0` | |
+| `total_gold_won` | BIGINT | NOT NULL | `0` | |
+| `total_gold_lost` | BIGINT | NOT NULL | `0` | |
+| `last_match_at` | TIMESTAMPTZ | NULL | — | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE pvp_player_stats
+  ADD CONSTRAINT pk_pvp_stats PRIMARY KEY (season_id, user_id),
+  ADD CONSTRAINT fk_pvp_stats_season FOREIGN KEY (season_id) REFERENCES pvp_seasons(id),
+  ADD CONSTRAINT fk_pvp_stats_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT fk_pvp_stats_char FOREIGN KEY (character_id) REFERENCES characters(id);
+
+-- Leaderboard query
+CREATE INDEX ix_pvp_stats_leaderboard ON pvp_player_stats(season_id, elo DESC);
+```
+
+---
+
+## 11. Таблицы — Audit & Operations
+
+### 11.1 `audit_events`
+
+Security-чувствительные события. Долгоживущие (≥ 1 год).
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NULL | — | NULL для системных |
+| `event_type` | TEXT | NOT NULL | — | LOGIN / LOGIN_FAILED / WITHDRAW_REQUEST / 2FA_FAILED / ADMIN_ACTION / SUSPICIOUS_ACTIVITY / etc. |
+| `severity` | TEXT | NOT NULL | `'INFO'` | INFO / WARN / ALERT / CRITICAL |
+| `payload` | JSONB | NOT NULL | `'{}'` | Контекстные данные |
+| `ip` | INET | NULL | — | |
+| `user_agent` | TEXT | NULL | — | |
+| `country` | TEXT | NULL | — | |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+
+```sql
+ALTER TABLE audit_events
+  ADD CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id),
+  ADD CONSTRAINT ck_audit_severity CHECK (severity IN ('INFO','WARN','ALERT','CRITICAL'));
+
+CREATE INDEX ix_audit_user_created ON audit_events(user_id, created_at DESC);
+CREATE INDEX ix_audit_type_created ON audit_events(event_type, created_at DESC);
+CREATE INDEX ix_audit_severity ON audit_events(severity, created_at DESC) WHERE severity IN ('ALERT','CRITICAL');
+```
+
+**Партиционирование:** по месяцу.
+
+### 11.2 `idempotency_keys`
+
+Кэш ответов для idempotent POST-операций.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `key` | TEXT | NOT NULL | — | PK, обычно UUID от клиента |
+| `user_id` | BIGINT | NOT NULL | — | Чтобы не было коллизий между юзерами |
+| `endpoint` | TEXT | NOT NULL | — | `/api/v1/inventory/equip` |
+| `request_hash` | TEXT | NOT NULL | — | SHA-256 от тела запроса (защита от reuse с другим payload) |
+| `response_status` | INT | NOT NULL | — | HTTP status |
+| `response_body` | JSONB | NULL | — | Закэшированный ответ |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `expires_at` | TIMESTAMPTZ | NOT NULL | — | now() + 24h |
+
+```sql
+ALTER TABLE idempotency_keys
+  ADD CONSTRAINT pk_idem PRIMARY KEY (key, user_id),
+  ADD CONSTRAINT fk_idem_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+
+CREATE INDEX ix_idem_expires ON idempotency_keys(expires_at);
+-- Cleanup-cron убирает expired
+```
+
+### 11.3 `daily_quests` (v1)
+
+Динамически генерируемые квесты.
+
+| Колонка | Тип | NULL | Default | Описание |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | — | — | PK |
+| `user_id` | BIGINT | NOT NULL | — | |
+| `date_utc` | DATE | NOT NULL | — | На какой день |
+| `quest_type` | TEXT | NOT NULL | — | KILL_X_MOBS / COMPLETE_DUNGEON / EQUIP_RARITY / etc. |
+| `params` | JSONB | NOT NULL | — | `{target: 50, mob_type: "skeleton"}` |
+| `progress` | JSONB | NOT NULL | `'{}'` | `{killed: 12}` |
+| `is_completed` | BOOLEAN | NOT NULL | `false` | |
+| `is_claimed` | BOOLEAN | NOT NULL | `false` | |
+| `reward_gold` | BIGINT | NOT NULL | — | |
+| `reward_xp` | INT | NOT NULL | — | |
+| `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
+| `completed_at` | TIMESTAMPTZ | NULL | — | |
+
+```sql
+ALTER TABLE daily_quests
+  ADD CONSTRAINT fk_dq_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  ADD CONSTRAINT uq_dq_user_date_type UNIQUE (user_id, date_utc, quest_type);
+
+CREATE INDEX ix_dq_user_date ON daily_quests(user_id, date_utc);
+CREATE INDEX ix_dq_active ON daily_quests(user_id) WHERE NOT is_claimed;
+```
+
+---
+
+## 12. Триггеры
+
+### 12.1 Автоматическое `updated_at`
+
+Универсальный триггер для всех таблиц с этой колонкой.
+
+```sql
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Применяется к каждой таблице с updated_at
+CREATE TRIGGER trg_users_updated_at
+  BEFORE UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION trg_set_updated_at();
+
+-- Аналогично для characters, balances, items, wallets, deposits, withdrawals,
+-- market_listings, pvp_player_stats, daily_dungeon_entries, dungeons, ...
+```
+
+### 12.2 Audit on user block
+
+```sql
+CREATE OR REPLACE FUNCTION trg_user_block_audit()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.is_blocked = true AND OLD.is_blocked = false THEN
+    INSERT INTO audit_events(user_id, event_type, severity, payload, created_at)
+    VALUES (NEW.id, 'USER_BLOCKED', 'ALERT',
+            jsonb_build_object('reason', NEW.block_reason), now());
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_users_block_audit
+  AFTER UPDATE ON users
+  FOR EACH ROW
+  WHEN (NEW.is_blocked IS DISTINCT FROM OLD.is_blocked)
+  EXECUTE FUNCTION trg_user_block_audit();
+```
+
+### 12.3 Auto-update `last_activity_at` для `dungeon_runs`
+
+```sql
+CREATE OR REPLACE FUNCTION trg_run_activity()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.current_floor != OLD.current_floor OR
+     NEW.pending_gold != OLD.pending_gold THEN
+    NEW.last_activity_at = now();
+    NEW.last_checkpoint_at = now();
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_runs_activity
+  BEFORE UPDATE ON dungeon_runs
+  FOR EACH ROW
+  WHEN (OLD.status = 'IN_PROGRESS')
+  EXECUTE FUNCTION trg_run_activity();
+```
+
+### 12.4 Запрет понижения totals в wallets
+
+```sql
+CREATE OR REPLACE FUNCTION trg_wallet_totals_only_grow()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.total_deposited_wotk < OLD.total_deposited_wotk THEN
+    RAISE EXCEPTION 'total_deposited_wotk can only grow';
+  END IF;
+  IF NEW.total_withdrawn_wotk < OLD.total_withdrawn_wotk THEN
+    RAISE EXCEPTION 'total_withdrawn_wotk can only grow';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_wallets_totals_grow
+  BEFORE UPDATE ON wallets
+  FOR EACH ROW EXECUTE FUNCTION trg_wallet_totals_only_grow();
+```
+
+### 12.5 Решение «не использовать»
+
+Намеренно НЕ ставим триггер на `INSERT INTO transactions` для автоматического обновления `balances`. Причина: эту логику делает приложение в одной DB-транзакции с явными контролями (CHECK CONSTRAINT уже не пропустит negative balance). Триггер тут добавит магию и затруднит дебаг.
+
+---
+
+## 13. Функции (хранимые процедуры)
+
+### 13.1 `regen_energy_for_user(uid BIGINT) RETURNS INT`
+
+Lazy-регенерация энергии при чтении баланса.
+
+```sql
+CREATE OR REPLACE FUNCTION regen_energy_for_user(uid BIGINT)
+RETURNS INT AS $$
+DECLARE
+  current_energy INT;
+  current_cap INT;
+  last_update TIMESTAMPTZ;
+  elapsed_minutes INT;
+  regen_amount INT;
+  new_energy INT;
+BEGIN
+  SELECT energy, energy_cap, energy_updated_at
+    INTO current_energy, current_cap, last_update
+  FROM balances WHERE user_id = uid FOR UPDATE;
+
+  IF current_energy >= current_cap THEN
+    RETURN current_energy;
+  END IF;
+
+  elapsed_minutes := EXTRACT(EPOCH FROM (now() - last_update)) / 60;
+  regen_amount := elapsed_minutes / 6;  -- 1 ед / 6 мин
+
+  IF regen_amount = 0 THEN
+    RETURN current_energy;
+  END IF;
+
+  new_energy := LEAST(current_energy + regen_amount, current_cap);
+
+  UPDATE balances
+     SET energy = new_energy,
+         energy_updated_at = energy_updated_at + (regen_amount * INTERVAL '6 minutes')
+   WHERE user_id = uid;
+
+  RETURN new_energy;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### 13.2 `cleanup_expired_runs() RETURNS INT`
+
+Cron-функция для очистки забытых ранов.
+
+```sql
+CREATE OR REPLACE FUNCTION cleanup_expired_runs()
+RETURNS INT AS $$
+DECLARE
+  affected INT;
+BEGIN
+  WITH expired AS (
+    UPDATE dungeon_runs
+       SET status = 'ABANDONED',
+           finished_at = now()
+     WHERE status = 'IN_PROGRESS'
+       AND expires_at < now()
+    RETURNING id
+  )
+  SELECT count(*) INTO affected FROM expired;
+  RETURN affected;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Запускается через Arq cron каждые 5 минут.
+
+### 13.3 `cleanup_expired_idempotency_keys() RETURNS INT`
+
+```sql
+CREATE OR REPLACE FUNCTION cleanup_expired_idempotency_keys()
+RETURNS INT AS $$
+DECLARE
+  affected INT;
+BEGIN
+  DELETE FROM idempotency_keys WHERE expires_at < now();
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  RETURN affected;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+## 14. Партиционирование
+
+Для high-volume таблиц используем декларативное партиционирование Postgres по месяцам.
+
+### 14.1 Кандидаты на партиционирование
+
+| Таблица | Когда | Стратегия |
+|---|---|---|
+| `transactions` | С первого дня | RANGE на `created_at`, по месяцу |
+| `audit_events` | С первого дня | RANGE на `created_at`, по месяцу |
+| `run_encounters` | С v1 (когда таблица > 5M) | RANGE на `created_at`, по месяцу |
+| `dungeon_runs` | С v1 (когда > 10M) | RANGE на `started_at`, по месяцу |
+| `pvp_matches` | С v1.1 | RANGE на `played_at`, по месяцу |
+| `deposits`, `withdrawals` | НЕ партиционируем | Объёмы малы, доступ по user_id |
+
+### 14.2 Пример для `transactions`
+
+```sql
+CREATE TABLE transactions (
+  id BIGSERIAL,
+  user_id BIGINT NOT NULL,
+  type TEXT NOT NULL,
+  amount BIGINT NOT NULL,
+  currency TEXT NOT NULL,
+  balance_after BIGINT NOT NULL,
+  ref JSONB,
+  idempotency_key TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+-- Стартовые партиции (создавать на 3 месяца вперёд через cron)
+CREATE TABLE transactions_2026_05 PARTITION OF transactions
+  FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+CREATE TABLE transactions_2026_06 PARTITION OF transactions
+  FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
+-- ...
+```
+
+### 14.3 Cron создания партиций
+
+Скрипт через Arq: каждый день проверяет, что есть партиции на 3 месяца вперёд. Если нет — создаёт.
+
+### 14.4 Архивация
+
+Старые партиции (> 12 мес) можно `DETACH` и выгрузить в S3 как parquet через `COPY`. Для аудита — доступны cold-storage'ом.
+
+---
+
+## 15. Materialized Views (v1+)
+
+Не нужны для MVP, но запланированы:
+
+```sql
+-- Топ-100 игроков по уровню
+CREATE MATERIALIZED VIEW mv_leaderboard_level AS
+SELECT c.id, c.name, c.class, c.level, c.xp, u.telegram_username
+FROM characters c
+JOIN users u ON u.id = c.user_id
+WHERE NOT u.is_blocked AND NOT c.is_blocked AND c.deleted_at IS NULL
+ORDER BY c.level DESC, c.xp DESC
+LIMIT 100;
+
+CREATE UNIQUE INDEX ON mv_leaderboard_level(id);
+
+-- Refresh каждый час через cron
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_leaderboard_level;
+```
+
+---
+
+## 16. Очерёдность миграций для MVP
+
+**Migration 0001** — Базовые таблицы:
+- users, user_security, balances, wallets
+- Триггер `trg_set_updated_at` для всех
+
+**Migration 0002** — Reference data:
+- item_bases, affix_definitions
+- Seeds через separate Python скрипт `scripts/seed_reference.py`
+
+**Migration 0003** — Game state:
+- characters, items
+- Триггер user_block_audit
+
+**Migration 0004** — Economy:
+- transactions (с партиционированием с первого дня)
+- idempotency_keys
+
+**Migration 0005** — Dungeons:
+- dungeons, dungeon_runs, run_encounters, daily_dungeon_entries, campaign_progress
+- Триггер run_activity
+
+**Migration 0006** — TON wallet:
+- deposits, withdrawals, treasury_log
+- Триггер wallet_totals_grow
+
+**Migration 0007** — Audit & ops:
+- audit_events (с партиционированием)
+- referrals
+
+**Migration 0008** — Functions:
+- regen_energy_for_user
+- cleanup_expired_runs
+- cleanup_expired_idempotency_keys
+
+**v1 миграции (после MVP):**
+
+- 0010 — market_listings, market_sales
+- 0011 — daily_quests
+- 0012 — pvp_seasons, pvp_matches, pvp_player_stats
+- 0020 — friends, achievements (если нужны)
+
+---
+
+## 17. Бэкапы и восстановление
+
+### 17.1 Стратегия
+
+- **Continuous WAL archiving** в S3 (Backblaze B2 для дешевизны)
+- **Полные бэкапы** через `pg_basebackup` каждые 24 часа
+- **Логические дампы** ключевых таблиц (`users`, `balances`, `transactions`) каждый час — для быстрого partial restore
+- **Point-in-time recovery** возможен в окне 7 дней
+
+### 17.2 Что НЕ бэкапить регулярно
+
+- `idempotency_keys` (TTL 24h, восстановится естественно)
+- `audit_events` партиции старше 30 дней — отдельный бэкап-режим
+- Партиции `transactions` старше 90 дней — выгружать в архив
+
+### 17.3 Тестовое восстановление
+
+Раз в месяц — restore последнего бэкапа в staging и smoke-тест.
+
+---
+
+## 18. Безопасность доступа
+
+### 18.1 Роли
+
+```sql
+-- Роль для приложения (FastAPI / Colyseus)
+CREATE ROLE wotk_app LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE wotk TO wotk_app;
+GRANT USAGE ON SCHEMA public TO wotk_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO wotk_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO wotk_app;
+
+-- Роль read-only для аналитики
+CREATE ROLE wotk_analytics LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE wotk TO wotk_analytics;
+GRANT USAGE ON SCHEMA public TO wotk_analytics;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO wotk_analytics;
+
+-- Роль для бэкапов
+CREATE ROLE wotk_backup LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE wotk TO wotk_backup;
+GRANT USAGE ON SCHEMA public TO wotk_backup;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO wotk_backup;
+```
+
+### 18.2 Row-Level Security (на v1+, опционально)
+
+Для multi-tenant изоляции через app — пока не нужно.
+
+---
+
+## 19. Open questions / TODO
+
+- [ ] Решить про `pg_partman` для авто-управления партициями vs самописный cron
+- [ ] Определить retention для `audit_events` (1 год? 2?)
+- [ ] Когда вводить read replicas (вероятно ~5k DAU)
+- [ ] PgBouncer в transaction mode перед connection pool — со старта или при первом упоре в connections
+- [ ] Шардинг по `user_id` — план перехода (Citus vs ручной), trigger при ~500k DAU
+- [ ] Materialized view для leaderboard — refresh-стратегия (concurrent? interval?)

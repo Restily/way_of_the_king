@@ -1,0 +1,41 @@
+# Local dev — без TLS
+{
+	auto_https off
+}
+
+:80 {
+	# REST API
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# WebSocket для боя
+	handle /game/* {
+		reverse_proxy realtime:2567
+	}
+
+	# Health check
+	handle /health {
+		respond "ok" 200
+	}
+
+	# Frontend (в dev — Vite dev server проксируется отдельно или открывается напрямую)
+	handle {
+		respond "Way Of The King — frontend сюда добавится" 200
+	}
+}
+
+# Production-конфиг закомментирован — раскомментить при деплое
+# wayoftheking.app {
+# 	handle /api/* {
+# 		reverse_proxy backend:8000
+# 	}
+# 	handle /game/* {
+# 		reverse_proxy realtime:2567
+# 	}
+# 	handle {
+# 		root * /srv/frontend
+# 		try_files {path} /index.html
+# 		file_server
+# 	}
+# }

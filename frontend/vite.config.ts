@@ -1,0 +1,33 @@
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/game': {
+        target: 'ws://localhost:2567',
+        ws: true,
+      },
+    },
+  },
+  build: {
+    target: 'es2022',
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'pixi': ['pixi.js', '@pixi/tilemap'],
+          'react': ['react', 'react-dom'],
+          'i18n': ['i18next', 'react-i18next'],
+        },
+      },
+    },
+  },
+});

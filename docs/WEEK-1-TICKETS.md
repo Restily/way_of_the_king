@@ -1,6 +1,6 @@
 # Week 1 — Тикеты
 
-Версия: 0.1
+Версия: 0.2 (обновлено 2026-04-27 после schema simplification + security review)
 Период: 7 дней, ~60 рабочих часов
 Цель недели: рабочий скелет в Telegram — Mini App открывается, юзер логинится, создаёт Knight, попадает на City экран. Деплой на Hetzner с CI/CD.
 
@@ -8,98 +8,149 @@
 - **Acceptance criteria** — что считается «готово»
 - **Estimate** — реалистичная оценка (часы)
 - **Dependencies** — что должно быть готово до старта
+- **Status** — `TODO` / `PARTIAL` (уже частично сделано в скаффолдинге) / `DONE`
+
+## Уже сделано в фазе 0 (scaffolding + security review)
+
+При инициализации проекта закрыты:
+- ✅ Структура монорепо (backend/realtime/frontend/shared/maps + docker-compose + Caddyfile)
+- ✅ Git-репо с двумя коммитами (`a424087` security hardening, `45cfdbc` initial scaffold)
+- ✅ FastAPI каркас с `/health`, structlog, Sentry redaction (`sentry_setup.py`), Pydantic validator с production-чеками, slowapi limiter, жёсткий CORS allowlist
+- ✅ Realtime каркас с Colyseus 0.16, безопасными дефолтами env, basic-auth на monitor, pino redact
+- ✅ Frontend каркас (React 19 + Vite 6 + PixiJS 8 deps + Telegram WebApp в index.html)
+- ✅ CI workflow (lint+test+build для трёх сервисов) + Dependabot (weekly pip+npm+actions+docker)
+- ✅ Docs: SPEC.md, ROADMAP.md, DATABASE.md (с smallint enums и упрощённой схемой), RUN-LIFECYCLE.md, SECURITY.md
+- ✅ Тесты: test_health, test_config_security, test_sentry_redaction (15 кейсов суммарно)
+
+Поэтому многие тикеты ниже либо `PARTIAL` (доделать оставшееся), либо `TODO` (новые, не пересекаются).
 
 ---
 
 ## День 1 (Пн) — локальная среда + dev tools (~8ч)
 
-### W1-001 — Локальная среда разработки
+### W1-001 — Локальная среда разработки `TODO`
 - Установить: Python 3.13, uv, Node.js 22, Docker Desktop, Tiled Editor, ngrok
 - Активировать GitHub Copilot или Cursor (опционально, в дополнение к Claude Code)
 - Настроить IDE (VS Code/Cursor): Python ext, Pylance, ESLint, Prettier, EditorConfig
 - **AC:** все CLI работают, `python --version`, `node --version`, `docker --version` отвечают
 - **Estimate:** 1.5ч
 
-### W1-002 — Поднять postgres + redis локально
+### W1-002 — Поднять postgres + redis локально `TODO`
 - `docker compose up -d postgres redis` — должно подняться
 - Проверить подключение через psql / redis-cli
 - **AC:** `psql -h localhost -U wotk -d wotk -c "SELECT 1"` возвращает 1
 - **Estimate:** 0.5ч
 - **Dependencies:** docker-compose.yml уже создан
 
-### W1-003 — Backend: установка зависимостей и базовый запуск
-- `cd backend && uv sync` — подтянуть deps
-- Запустить локально: `uv run uvicorn wotk.api.main:app --reload`
-- Открыть http://localhost:8000/health → `{"status": "ok"}`
-- Запустить тесты: `uv run pytest` — health-test проходит
-- **AC:** /health возвращает 200, тест зелёный
-- **Estimate:** 1ч
+### W1-003 — Backend: установка зависимостей и базовый запуск `PARTIAL`
+- ✅ Уже сделано: pyproject.toml с зависимостями, FastAPI app с /health, тест на health
+- Осталось: запустить `cd backend && uv sync` → сгенерируется `uv.lock` → `uv run uvicorn wotk.api.main:app --reload`
+- Запустить тесты: `uv run pytest` — все 3 файла тестов должны пройти (health, config_security, sentry_redaction)
+- **AC:** /health возвращает 200, все тесты зелёные, `uv.lock` закоммичен
+- **Estimate:** 0.5ч
 - **Dependencies:** W1-001
 
-### W1-004 — Alembic init + первая пустая миграция
-- Создать `alembic/versions/0001_init.py` (пустая миграция-плейсхолдер)
-- Проверить: `uv run alembic upgrade head` отрабатывает на пустой БД
-- **AC:** в БД появляется таблица `alembic_version`
-- **Estimate:** 1ч
+### W1-004 — Alembic init + первая пустая миграция `PARTIAL`
+- ✅ Уже сделано: alembic.ini, alembic/env.py, script.py.mako template
+- Осталось: `cd backend && uv run alembic revision -m "0001_baseline_empty"` (пустая placeholder-миграция перед W1-011)
+- Проверить: `uv run alembic upgrade head` создаёт `alembic_version`
+- **AC:** в БД появляется таблица `alembic_version`, downgrade работает
+- **Estimate:** 0.5ч
 - **Dependencies:** W1-002, W1-003
 
-### W1-005 — Структурное логирование + Sentry
-- Конфиг structlog (JSON-формат для prod, читаемый для dev)
-- Sentry init (если SENTRY_DSN задан)
-- Middleware: добавление request_id в каждый запрос
-- **AC:** ошибка в эндпоинте → структурированный JSON-лог + entry в Sentry (если включён)
-- **Estimate:** 2ч
+### W1-005 — Структурное логирование + Sentry `PARTIAL`
+- ✅ Уже сделано: `sentry_setup.py` с PII/secret redaction, structlog import в main.py
+- Осталось: middleware с `request_id` для каждого запроса (FastAPI dependency или Starlette middleware), биндинг в structlog context
+- structlog: JSON-формат в проде, человекочитаемый в dev (по `app_env`)
+- **AC:** ошибка в эндпоинте → структурированный JSON-лог с request_id + entry в Sentry (если SENTRY_DSN задан)
+- **Estimate:** 1ч
 - **Dependencies:** W1-003
 
-### W1-006 — GitHub репозиторий + первый коммит
-- Создать private repo в GitHub Org
-- `git init`, добавить remote, первый коммит «initial scaffold»
-- Push в main
-- **AC:** код в GitHub, CI запустился (даже если упал)
-- **Estimate:** 1ч
+### W1-006 — GitHub репозиторий + push `PARTIAL`
+- ✅ Уже сделано: локальный git-репо инициализирован, 2 коммита на main (`45cfdbc`, `a424087`, плюс docs `6403993`)
+- Осталось: создать private repo в GitHub Org → `git remote add origin ...` → `git push -u origin main`
+- Проверить, что Dependabot активировался (PRs появятся через ~неделю)
+- **AC:** код в GitHub, CI зелёный на главной, `/security-review` slash-команда теперь работает
+- **Estimate:** 0.5ч
 
-### W1-007 — Прогон CI локально (acted) для отладки
+### W1-007 — Прогон CI локально (act) для отладки `TODO`
 - Опционально: установить `act` для локального прогона GitHub Actions
-- Поправить если есть проблемы с CI workflow
-- **AC:** `git push` → CI зелёный (lint+test+build)
+- Поправить если есть проблемы с CI workflow (uv.lock missing, npm lock missing — после первого `uv sync` / `npm install`)
+- **AC:** `git push` → CI зелёный (lint+test+build для всех трёх сервисов)
 - **Estimate:** 1ч
 
 ---
 
-## День 2 (Вт) — модели и миграции (~8ч)
+## День 2 (Вт) — enums + модели + миграции (~8ч)
 
-### W1-010 — SQLAlchemy Base + первые модели
-- `wotk/domain/models.py`:
-  - `User` (id, telegram_id, username, locale, ip_country, device_fingerprint, is_blocked, created_at, last_seen_at)
-  - `Character` (id, user_id, class, name, level, xp, base_stats jsonb, passives jsonb, active_skills jsonb)
-  - `Balance` (user_id PK, gold, energy, energy_updated_at, shards, korona)
-  - `Wallet` (user_id PK, internal_ton_address, external_ton_address, external_address_set_at)
-  - `Transaction` (id, user_id, type, amount, currency, balance_after, ref jsonb, idempotency_key)
-- Использовать DeclarativeBase v2 синтаксис
-- **AC:** модели импортируются без ошибок, типизированы (mypy strict проходит)
+### W1-009 — `wotk/domain/enums.py` (smallint enum классы) `TODO`
+
+**Новый тикет.** Источник истины — `docs/DATABASE.md` §1.5.
+
+- Создать `backend/src/wotk/domain/enums.py` с `IntEnum` классами:
+  - `CharacterClass` (KNIGHT=0, ARCHER=1, NECROMANCER=2)
+  - `ItemRarity` (COMMON=0..LEGENDARY=4)
+  - `EquipmentSlot` (HELMET=0..RING=5)
+  - `AffixType` (PREFIX=0, SUFFIX=1, IMPLICIT=2)
+  - `TransactionType` (DUNGEON_ENTRY=0..ADMIN_ADJUST=22)
+  - `DungeonTheme`, `DungeonDifficulty`
+  - `RunStatus` (IN_PROGRESS=0..SETTLED=5)
+  - `EncounterResult`, `DepositStatus`, `WithdrawalStatus`, `TreasuryAction`
+  - `AuditEventType`, `AuditSeverity`
+  - `MarketListingStatus`, `PvpSeasonStatus`, `DailyQuestType`
+- Каждое значение задаётся явно (`KNIGHT = 0`, не `KNIGHT = auto()`) — чтобы случайно не сдвинуть после удаления.
+- Unit-тест `tests/test_enums.py`: парсит §1.5 из DATABASE.md и сверяет name+value, падает при расхождении (anti-drift защита).
+- **AC:** все enum'ы определены, тест синхронизации проходит
+- **Estimate:** 1.5ч
+- **Dependencies:** W1-003
+
+### W1-010 — SQLAlchemy Base + модели MVP `TODO`
+
+Источник истины — `docs/DATABASE.md`. Используем DeclarativeBase 2.0 + `Mapped[T]`.
+
+`backend/src/wotk/domain/models.py`:
+- **`User`**: id, telegram_id, telegram_username, telegram_first_name, locale, ip_country, is_blocked, block_reason, blocked_at, is_admin, withdrawal_2fa_enabled, created_at, updated_at, last_seen_at
+- **`Character`**: id, user_id (FK), class (smallint, mapped to `CharacterClass`), name, level, xp, unspent_points (JSONB `{stat,skill}`), base_stats (JSONB), passives (JSONB), active_skills (JSONB), created_at, updated_at, deleted_at
+- **`Balance`**: user_id (PK+FK), gold, energy, energy_cap, energy_updated_at, updated_at
+- **`Wallet`**: user_id (PK+FK), internal_ton_address, internal_derivation_path, external_ton_address, external_address_set_at, external_address_verified_at, total_deposited_wotk, total_withdrawn_wotk, created_at, updated_at
+- **`Transaction`**: id, user_id (FK), type (smallint, mapped to `TransactionType`), amount, balance_after, ref (JSONB), idempotency_key, created_at
+- **`Referral`**: id, referrer_user_id (FK), referred_user_id (FK), confirmed_at, bonus_paid_gold, expires_at, created_at
+
+Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger, ...)` с конвертацией через `TypeDecorator`.
+
+- **AC:** модели импортируются, mypy strict проходит, все enum-колонки типизированы как `Mapped[<EnumClass>]`
 - **Estimate:** 3ч
-- **Dependencies:** W1-004
+- **Dependencies:** W1-004, W1-009
 
-### W1-011 — Alembic миграция: первые таблицы
-- `alembic revision --autogenerate -m "init core tables"`
-- Проверить сгенерированную миграцию, поправить (индексы, constraints, defaults)
-- Прогнать `alembic upgrade head` на чистой БД
-- Проверить downgrade тоже работает
-- **AC:** все таблицы созданы, индексы стоят, downgrade откатывает чисто
-- **Estimate:** 2ч
+### W1-011 — Alembic миграции (по плану §16 DATABASE.md) `TODO`
+
+Создать миграции согласно `docs/DATABASE.md` §16. Для MVP (день 2) делаем 0001 + 0003 + 0004:
+- **0001** — users, balances, wallets + триггер `trg_set_updated_at`
+- **0003** — characters (items уберём в более позднюю фазу когда понадобятся)
+- **0004** — transactions (партиционирование с дня 1: `PARTITION BY RANGE (created_at)`, стартовые партиции на 3 месяца вперёд)
+- **0007** — referrals + audit_events skeleton
+
+Способ: НЕ `--autogenerate` (он может пропускать партиционирование, CHECK с BETWEEN). Писать вручную через Alembic op. Партиционирование — через `op.execute("CREATE TABLE ... PARTITION BY RANGE ...")`.
+
+Все CHECK constraints из DATABASE.md обязательны.
+
+- **AC:** все миграции применяются на пустой БД, downgrade работает, схема визуально совпадает с DATABASE.md (`\d users`, `\d characters` и т.д.)
+- **Estimate:** 3ч
 - **Dependencies:** W1-010
 
-### W1-012 — DB session helper для FastAPI
-- `wotk/core/db.py`: async engine, sessionmaker, dependency `get_session()` для FastAPI
-- Lifecycle: открытие/закрытие при старте/остановке app
-- **AC:** в эндпоинтах можно через `Depends(get_session)` получить async сессию
+### W1-012 — DB session helper для FastAPI `TODO`
+- `wotk/core/db.py`: async engine с asyncpg, sessionmaker, dependency `get_session()` для FastAPI
+- Pool size в конфиге (дефолт 20)
+- Lifecycle: graceful close в `lifespan`
+- **AC:** в эндпоинтах через `Depends(get_session)` доступна `AsyncSession`, в тестах есть фикстура с rollback
 - **Estimate:** 1.5ч
 - **Dependencies:** W1-010
 
-### W1-013 — Первый интеграционный тест с БД
-- pytest fixture: тестовая БД (отдельная schema или transaction-rollback)
-- Тест: создать User, прочитать обратно
-- **AC:** тест зелёный в CI
+### W1-013 — Первый интеграционный тест с БД `TODO`
+- pytest fixture: тестовая БД (отдельный namespace или transaction-rollback wrapper)
+- Тест: создать User → создать Balance + Wallet (NULL'ом) → прочитать через session → assert поля совпали
+- Тест: попытка вставить character с class=99 → должна упасть на CHECK constraint
+- **AC:** тесты зелёные в CI, БД-фикстура переиспользуется между тестами
 - **Estimate:** 1.5ч
 - **Dependencies:** W1-012
 
@@ -121,67 +172,87 @@
 - **AC:** access token issue/verify работают, expired token rejected
 - **Estimate:** 1.5ч
 
-### W1-022 — POST /api/v1/auth/login
+### W1-022 — POST /api/v1/auth/login `TODO`
 - Принимает `{init_data: str}` в body
-- Валидирует initData → находит/создаёт User → выдаёт JWT
-- Сохраняет ip_country (из Cloudflare header или MaxMind), device_fingerprint
-- Возвращает `{access_token, refresh_token, user: {...}}`
-- Geo-блок: если country в `GEO_BLOCK_COUNTRIES` → 403
-- **AC:** валидная initData → 200 с JWT, невалидная → 401, заблокированная страна → 403
+- Валидирует initData → находит/создаёт User → создаёт Balance (default `gold=0, energy=100`) и Wallet (NULL внешний адрес) если новый юзер → выдаёт JWT (access + refresh)
+- При первом логине: `locale` берётся из `initData.user.language_code` (если в whitelist `ru/en/es/pt/zh/ar`, иначе `ru`); telegram_username и first_name обновляются на каждом login
+- Сохраняет `ip_country` (из `CF-IPCountry` header / MaxMind GeoLite2)
+- Geo-блок: если country в `GEO_BLOCK_COUNTRIES` → 403 + INSERT audit_events с event_type=2 (LOGIN_GEO_BLOCKED)
+- Защита rate-limit: `@limiter.limit(f"{settings.rate_limit_login_per_ip_per_min}/minute")` на эндпоинт
+- Возвращает `{access_token, refresh_token, user: {id, locale, telegram_username, is_admin}}`
+- **AC:** валидная initData → 200 с JWT, невалидная → 401, заблокированная страна → 403, rate-limit срабатывает после 20 запросов/мин с одного IP
 - **Estimate:** 3ч
 - **Dependencies:** W1-020, W1-021, W1-012
 
-### W1-023 — Auth middleware / Depends
-- `Depends(current_user)` для защищённых эндпоинтов
-- Извлекает JWT из `Authorization: Bearer ...`
-- Проверяет, не заблокирован ли пользователь
-- **AC:** защищённые эндпоинты доступны только с валидным JWT
+### W1-023 — Auth middleware / Depends `TODO`
+- `Depends(current_user)` для защищённых эндпоинтов: извлекает JWT из `Authorization: Bearer ...`, валидирует, грузит User из БД, кэширует на запрос
+- Проверки: токен валиден → юзер существует → не заблокирован
+- На 401 — структурированный лог с request_id (без leakage токена)
+- Дополнительно: `Depends(current_admin)` — проверяет `is_admin=true`
+- **AC:** защищённые эндпоинты доступны только с валидным JWT, заблокированные юзеры получают 403
 - **Estimate:** 1.5ч
-- **Dependencies:** W1-021
+- **Dependencies:** W1-021, W1-005
 
-### W1-024 — GET /api/v1/me
-- Возвращает текущего юзера + его балансы + список персонажей
-- **AC:** с валидным JWT → 200 с данными юзера
-- **Estimate:** 1.5ч
-- **Dependencies:** W1-023
+### W1-024 — GET /api/v1/me `TODO`
+- Возвращает структуру `{user, balance, character?}`
+- `user`: id, locale, telegram_username, is_admin, withdrawal_2fa_enabled, created_at
+- `balance`: gold (с прим.lazy regen энергии через `regen_energy_for_user`), energy, energy_cap, energy_updated_at — после регена
+- `character`: первый Knight юзера (или null если не создан)
+- **AC:** с валидным JWT → 200 с актуальными данными, energy инкрементировался если прошло > 6 минут
+- **Estimate:** 2ч
+- **Dependencies:** W1-023, W1-013
 
 ---
 
 ## День 4 (Чт) — Knight creation + бот (~10ч)
 
-### W1-030 — POST /api/v1/characters (Knight only)
-- Body: `{name: str}`
-- Валидация: только класс knight в MVP, max 1 персонаж на user в MVP
-- Создаёт Character с базовыми статами (`{str: 10, dex: 5, int: 3}`), level 1, default skills
-- **AC:** создание возвращает 201 с character, повторное → 409
+### W1-030 — POST /api/v1/characters (Knight only) `TODO`
+- Body: `{name: str}` (3–20 chars, валидация Pydantic)
+- Header: `Idempotency-Key: <uuid>` (защита от двойного создания)
+- Валидация: `class = CharacterClass.KNIGHT` (0) принудительно в MVP, max 1 character на user (см. partial unique index `uq_characters_user_class`)
+- Создаёт Character со значениями:
+  - `class = 0`, `level = 1`, `xp = 0`
+  - `base_stats = {"str":10,"dex":5,"int":3}` (knight defaults)
+  - `unspent_points = {"stat":0,"skill":0}`
+  - `passives = []`, `active_skills = ["cleave","shield_bash","whirlwind","charge"]` (4 default skills)
+- **AC:** создание возвращает 201 с character, повторное (другая Idempotency-Key) → 409 c кодом `CHARACTER_ALREADY_EXISTS`
 - **Estimate:** 2ч
-- **Dependencies:** W1-023
+- **Dependencies:** W1-023, W1-009
 
-### W1-031 — Формулы статов (pure functions)
-- `wotk/game/stats.py`: `compute_derived_stats(base, equipment, passives) -> DerivedStats`
-- HP, Mana, ATK, DEF, Crit, AS, MS, Resistances
-- Полное покрытие unit-тестами
-- **AC:** формулы из SPEC.md реализованы и протестированы
+### W1-031 — Формулы статов (pure functions) `TODO`
+- `wotk/game/stats.py`: `compute_derived_stats(base_stats, equipment, passives) -> DerivedStats`
+- Формулы из `docs/SPEC.md` §2.2: HP, Mana, ATK, DEF, Crit Chance, Crit Damage, Attack Speed, Movement Speed, Resistances
+- Pure function — без I/O, без random, детерминирована
+- Полное покрытие pytest: каждая формула, edge cases (level 1 с дефолтным снаряжением, level 60 с full epic, нулевые/максимальные статы)
+- **AC:** все формулы из SPEC реализованы, ≥ 90% test coverage модуля
 - **Estimate:** 3ч
 
-### W1-032 — XP кривая + level up
-- `wotk/game/leveling.py`: `xp_for_level(n)`, `apply_xp(character, gained_xp) -> LevelUpResult`
-- Распределение нерастраченных stat points (3 на каждый level up)
-- Unit-тесты
-- **AC:** level up корректен, переходы XP-границ работают, нет потери XP при множественном level up
-- **Estimate:** 1.5ч
+### W1-032 — XP кривая + level up + поддержка денормализованного `level` `TODO`
+- `wotk/game/leveling.py`:
+  - `compute_level(xp: int) -> int` — pure, единственный источник истины
+  - `xp_for_level(level: int) -> int` — обратная функция (граница для UI)
+  - `apply_xp(character, gained_xp) -> LevelUpResult` — мутирует character.xp + character.level **в одной транзакции**
+- Level up даёт +3 stat points → инкремент `unspent_points.stat`
+- Корректная обработка multi-level (зашёл лвл 5, получил много XP, стал лвл 8 одним вызовом — даёт 9 stat points)
+- Unit-тесты: формула, multi-level, нет потери XP, level всегда == compute_level(xp)
+- **AC:** все edge cases покрыты, инвариант `level == compute_level(xp)` всегда верен
+- **Estimate:** 2ч
 
-### W1-033 — Bot init (aiogram)
-- `wotk/bot/main.py`: aiogram bot, единичный процесс
-- Команда `/start`: приветствие + кнопка с deeplink в Mini App
-- Команда `/help`
-- Запускается отдельным entry-point
-- **AC:** `/start` в боте → текст + кнопка, кнопка открывает Mini App URL
+### W1-033 — Bot init (aiogram) `TODO`
+- `wotk/bot/main.py`: aiogram 3 bot, единичный процесс (entrypoint `python -m wotk.bot`)
+- Команды:
+  - `/start [referral_code]` — приветствие + кнопка с `web_app` в Mini App. Если `referral_code` — записать в `referrals` table (если новый юзер)
+  - `/help` — текст помощи
+  - `/wallet` — placeholder, будет в Phase 7
+- Все строки через i18n (структура с RU/EN на bot-стороне)
+- **AC:** `/start` → текст + кнопка, кнопка открывает Mini App, deeplink `?startapp=ref_<code>` подхватывается
 - **Estimate:** 2.5ч
 
-### W1-034 — Тесты для character creation
-- Integration: создать юзера через login → создать персонажа → проверить через /me
-- **AC:** end-to-end сценарий зелёный
+### W1-034 — Тесты для character creation `TODO`
+- Integration: автологин (mock initData) → POST /characters {name:"Sir Lancelot"} → GET /me → assert character присутствует с правильными статами
+- Тест на повторное создание (idempotency)
+- Тест на класс отличный от knight → 422
+- **AC:** end-to-end сценарий зелёный, regression-защита от багов в base_stats / unspent_points структуре
 - **Estimate:** 1ч
 - **Dependencies:** W1-030, W1-024
 
@@ -308,9 +379,10 @@
 
 ## Итого по неделе
 
-- Всего тикетов: 30
+- Всего тикетов: 31 (добавлен W1-009 для enums.py)
 - Суммарная оценка: ~62 часа (точно в недельный бюджет 60ч с буфером)
-- Critical path: W1-001 → W1-003 → W1-010 → W1-022 → W1-042 → W1-053
+- Critical path: W1-001 → W1-003 → W1-009 → W1-010 → W1-011 → W1-022 → W1-042 → W1-053
+- **PARTIAL** тикеты: W1-003, W1-004, W1-005, W1-006 — суммарно сэкономлено ~5 часов работы (фундамент сделан в фазе scaffolding)
 
 ## Acceptance criteria недели
 

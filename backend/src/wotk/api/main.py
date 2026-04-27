@@ -28,7 +28,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_sentry(settings)
     log.info("startup", env=settings.app_env)
 
-    if settings.app_env != "development" and not settings.sentry_dsn:
+    if settings.app_env != "development" and not settings.sentry_dsn.get_secret_value():
         log.critical(
             "sentry_dsn_missing_in_non_dev",
             message="SENTRY_DSN is empty — errors will not be reported!",

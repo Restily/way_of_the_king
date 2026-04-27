@@ -90,6 +90,10 @@ def test_token_missing_required_claims_rejected() -> None:
     """sub/type/exp/iat — required."""
     settings = get_settings()
     payload = {"sub": "1"}  # missing type/exp/iat
-    forged = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    forged = jwt.encode(
+        payload,
+        settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
     with pytest.raises(JwtInvalid):
         verify_token(forged)

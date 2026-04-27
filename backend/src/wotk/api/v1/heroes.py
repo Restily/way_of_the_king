@@ -47,7 +47,10 @@ async def create_hero(
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
     idempotency_key: Annotated[  # noqa: ARG001 — wired для logger context на W2
-        str | None, Header(alias="Idempotency-Key")
+        str | None,
+        # max_length 128 защищает от DoS через гигантский header.
+        # UUID = 36 chars, ULID = 26 — 128 c запасом.
+        Header(alias="Idempotency-Key", max_length=128),
     ] = None,
 ) -> HeroCreated:
     """В MVP создаётся только Knight, max 1 на профиль (uq_hero_profile_class)."""

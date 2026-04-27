@@ -8,6 +8,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotk.api.deps import ensure_not_blocked
@@ -100,7 +101,7 @@ async def login(
     try:
         verified = verify_init_data(
             body.init_data,
-            settings.telegram_bot_token,
+            settings.telegram_bot_token.get_secret_value(),
             ttl_seconds=settings.telegram_initdata_ttl_seconds,
         )
     except (InvalidSignature, StaleInitData) as e:
@@ -120,7 +121,7 @@ async def login(
     )
 
     if profile is None:
-        profile = Profile(
+        new_profile = Profile(
             telegram_id=tg.id,
             telegram_username=tg.username,
             telegram_first_name=tg.first_name,
@@ -128,13 +129,27 @@ async def login(
             ip_country=country,
             last_seen_at=datetime.now(UTC),
         )
-        session.add(profile)
-        await session.flush()
-
-        session.add(Balance(profile_id=profile.id))
-        await session.flush()
-
-        log.info("profile_created", profile_id=profile.id, country=country)
+        session.add(new_profile)
+        try:
+            await session.flush()
+            session.add(Balance(profile_id=new_profile.id))
+            await session.flush()
+            profile = new_profile
+            log.info("profile_created", profile_id=profile.id, country=country)
+        except IntegrityError:
+            # Гонка: параллельный login для того же telegram_id успел
+            # создать профиль. Откатываем и подтягиваем существующий.
+            await session.rollback()
+            profile = await session.scalar(
+                select(Profile).where(Profile.telegram_id == tg.id)
+            )
+            if profile is None:
+                log.error("profile_race_recovery_failed", telegram_id=tg.id)
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="profile_race_recovery_failed",
+                )
+            _refresh_denormalized_fields(profile, tg, country)
     else:
         _refresh_denormalized_fields(profile, tg, country)
 

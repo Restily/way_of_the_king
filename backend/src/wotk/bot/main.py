@@ -163,7 +163,8 @@ async def _try_record_referral(
 
 async def main() -> None:
     settings = get_settings()
-    if not settings.telegram_bot_token:
+    bot_token = settings.telegram_bot_token.get_secret_value()
+    if not bot_token:
         log.error("telegram_bot_token_not_set")
         sys.exit(1)
 
@@ -174,7 +175,7 @@ async def main() -> None:
     )
 
     bot = Bot(
-        token=settings.telegram_bot_token,
+        token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = _build_dispatcher(miniapp_url=miniapp_url)

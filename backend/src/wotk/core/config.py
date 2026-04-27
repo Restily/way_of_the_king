@@ -2,12 +2,18 @@
 
 В staging/production environment Pydantic-валидатор отказывается стартовать
 если найдены небезопасные значения (слабые секреты, debug=true, и т.д.).
+
+Все секреты типизированы как `SecretStr` — `repr()` возвращает
+`SecretStr('**********')`, значение не попадает в логи / Sentry / трейсбэки
+случайно. Извлечение через `.get_secret_value()`.
 """
+
+from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Маркеры небезопасных дефолтов в секретах. Если строка содержит любой из них,
@@ -23,11 +29,20 @@ WEAK_SECRET_MARKERS = (
 MIN_SECRET_LENGTH = 32
 
 
-def _is_weak_secret(value: str) -> bool:
-    if not value or len(value) < MIN_SECRET_LENGTH:
+def _is_weak_secret(value: SecretStr | str) -> bool:
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if not raw or len(raw) < MIN_SECRET_LENGTH:
         return True
-    lowered = value.lower()
+    lowered = raw.lower()
     return any(marker in lowered for marker in WEAK_SECRET_MARKERS)
+
+
+def _secret_eq(a: SecretStr, b: SecretStr) -> bool:
+    return a.get_secret_value() == b.get_secret_value()
+
+
+def _secret_empty(value: SecretStr) -> bool:
+    return not value.get_secret_value()
 
 
 class Settings(BaseSettings):
@@ -72,13 +87,13 @@ class Settings(BaseSettings):
     )
 
     # === Telegram ===
-    telegram_bot_token: str = ""
+    telegram_bot_token: SecretStr = SecretStr("")
     telegram_bot_username: str = "WayOfTheKingDevBot"
     telegram_initdata_ttl_seconds: int = 86400
 
     # === JWT ===
     # ОБЯЗАТЕЛЬНО задать в env для staging/production. ≥ 32 байта.
-    jwt_secret: str = ""
+    jwt_secret: SecretStr = SecretStr("")
     # Literal — защита от прокидывания "none" или асимметричных алгоритмов
     # (известная JWT уязвимость).
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
@@ -90,20 +105,20 @@ class Settings(BaseSettings):
     # Разные секреты для разных направлений (defense in depth).
     # Если realtime скомпрометирован — атакующий не может выдать FastAPI→realtime
     # admin-команду; и наоборот.
-    internal_hmac_realtime_to_api: str = ""
-    internal_hmac_api_to_realtime: str = ""
+    internal_hmac_realtime_to_api: SecretStr = SecretStr("")
+    internal_hmac_api_to_realtime: SecretStr = SecretStr("")
 
     # === TON ===
     ton_network: Literal["testnet", "mainnet"] = "testnet"
     ton_rpc_url: str = "https://testnet.toncenter.com/api/v2/jsonRPC"
-    ton_rpc_api_key: str = ""
+    ton_rpc_api_key: SecretStr = SecretStr("")
     wotk_jetton_master_address: str = ""
     # ВНИМАНИЕ: для production использовать Docker secrets / systemd LoadCredential
     # вместо обычных env vars (см. docs/SECURITY.md §3).
-    hot_wallet_mnemonic: str = ""
+    hot_wallet_mnemonic: SecretStr = SecretStr("")
 
     # === Sentry ===
-    sentry_dsn: str = ""
+    sentry_dsn: SecretStr = SecretStr("")
 
     # === Geo blocking ===
     geo_block_countries: str = "US,GB,IR,KP,SY,CU"
@@ -136,13 +151,13 @@ class Settings(BaseSettings):
                     f"and must not contain weak markers in {self.app_env} environment"
                 )
 
-        if not self.telegram_bot_token:
+        if _secret_empty(self.telegram_bot_token):
             problems.append("TELEGRAM_BOT_TOKEN is required in non-development environments")
 
         if self.app_debug:
             problems.append("APP_DEBUG must be false in staging/production")
 
-        if self.internal_hmac_realtime_to_api == self.internal_hmac_api_to_realtime:
+        if _secret_eq(self.internal_hmac_realtime_to_api, self.internal_hmac_api_to_realtime):
             problems.append(
                 "INTERNAL_HMAC_REALTIME_TO_API and INTERNAL_HMAC_API_TO_REALTIME "
                 "must be DIFFERENT secrets"
@@ -151,7 +166,7 @@ class Settings(BaseSettings):
         if self.app_env == "production":
             if self.ton_network != "mainnet":
                 problems.append("TON_NETWORK must be 'mainnet' in production")
-            if not self.hot_wallet_mnemonic:
+            if _secret_empty(self.hot_wallet_mnemonic):
                 problems.append("HOT_WALLET_MNEMONIC is required in production")
             if not self.wotk_jetton_master_address:
                 problems.append("WOTK_JETTON_MASTER_ADDRESS is required in production")

@@ -61,7 +61,11 @@ def issue_token(
         "iat": iat,
         "exp": iat + _ttl_for(token_type),
     }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return jwt.encode(
+        payload,
+        settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
 
 
 def issue_access_token(profile_id: int, *, now: int | None = None) -> str:
@@ -85,7 +89,7 @@ def verify_token(
     try:
         payload = jwt.decode(
             token,
-            settings.jwt_secret,
+            settings.jwt_secret.get_secret_value(),
             algorithms=[settings.jwt_algorithm],
             options={"require": ["sub", "type", "exp", "iat"]},
         )

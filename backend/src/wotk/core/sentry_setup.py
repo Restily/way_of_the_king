@@ -43,6 +43,9 @@ SENSITIVE_FIELD_NAMES = frozenset({
     "init_data",
     "initdata",
     "ws_token",
+    "access_token",
+    "refresh_token",
+    "idempotency_key",
 })
 
 # Mnemonic-подобная строка: 12-24 lowercase английских слова через пробел
@@ -96,12 +99,13 @@ def _before_send(event: dict, _hint: dict) -> dict | None:
 
 
 def init_sentry(settings: Settings) -> None:
-    if not settings.sentry_dsn:
+    dsn = settings.sentry_dsn.get_secret_value()
+    if not dsn:
         return
 
     try:
         sentry_sdk.init(
-            dsn=settings.sentry_dsn,
+            dsn=dsn,
             environment=settings.app_env,
             before_send=_before_send,
             send_default_pii=False,

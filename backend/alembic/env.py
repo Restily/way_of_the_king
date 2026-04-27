@@ -10,10 +10,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from wotk.core.config import get_settings
 
-# Импорт моделей здесь после их добавления:
-# from wotk.domain.models import Base
-# target_metadata = Base.metadata
-target_metadata = None
+from wotk.domain.models import Base  # noqa: E402
+
+target_metadata = Base.metadata
 
 config = context.config
 settings = get_settings()

@@ -11,6 +11,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.responses import JSONResponse
 
 from wotk.core.config import get_settings
+from wotk.core.db import dispose_engine
 from wotk.core.limiter import limiter
 from wotk.core.sentry_setup import init_sentry
 
@@ -30,6 +31,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         )
 
     yield
+    await dispose_engine()
     log.info("shutdown")
 
 

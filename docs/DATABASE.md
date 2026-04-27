@@ -290,7 +290,6 @@ erDiagram
 ```sql
 ALTER TABLE profile
   ADD CONSTRAINT uq_profile_telegram_id UNIQUE (telegram_id),
-  ADD CONSTRAINT ck_profile_locale CHECK (locale IN ('ru','en','es','pt','zh','ar'));
 ```
 
 **Индексы:**
@@ -357,20 +356,6 @@ CREATE INDEX ix_referral_referrer_active ON referral(referrer_profile_id, expire
 
 **Constraints:**
 ```sql
--- ALTER TABLE hero
---   ADD CONSTRAINT fk_hero_profile FOREIGN KEY (profile_id) REFERENCES profile(id) ON DELETE CASCADE,
---   ADD CONSTRAINT ck_hero_class CHECK (class BETWEEN 0 AND 2),
---   ADD CONSTRAINT ck_hero_level CHECK (level BETWEEN 1 AND 100),
---   ADD CONSTRAINT ck_hero_xp CHECK (xp >= 0),
---   ADD CONSTRAINT ck_hero_name_len CHECK (char_length(name) BETWEEN 3 AND 20),
---   ADD CONSTRAINT ck_hero_unspent_points CHECK (
---     jsonb_typeof(unspent_points) = 'object'
---     AND jsonb_typeof(unspent_points->'stat') = 'number'
---     AND jsonb_typeof(unspent_points->'skill') = 'number'
---     AND (unspent_points->>'stat')::int >= 0
---     AND (unspent_points->>'skill')::int >= 0
---   );
-
 -- В MVP: один персонаж определённого класса на юзера
 CREATE UNIQUE INDEX uq_hero_profile_class ON hero(profile_id, class) WHERE deleted_at IS NULL;
 ```
@@ -411,8 +396,6 @@ CREATE INDEX ix_hero_level ON hero(level) WHERE deleted_at IS NULL;
 ALTER TABLE balance
   ADD CONSTRAINT pk_balance PRIMARY KEY (profile_id),
   ADD CONSTRAINT fk_balance_profile FOREIGN KEY (profile_id) REFERENCES profile(id) ON DELETE CASCADE,
-  ADD CONSTRAINT ck_balance_gold_nonneg CHECK (gold >= 0),
-  ADD CONSTRAINT ck_balance_energy CHECK (energy >= 0 AND energy <= energy_cap);
 ```
 
 **Триггеры:** `updated_at` + проверка инвариантов через CHECK.
@@ -445,7 +428,6 @@ ALTER TABLE balance
 ```sql
 ALTER TABLE transaction
   ADD CONSTRAINT fk_transaction_profile FOREIGN KEY (profile_id) REFERENCES profile(id),
-  ADD CONSTRAINT ck_transaction_type CHECK (type BETWEEN 0 AND 22),
   ADD CONSTRAINT uq_transaction_idempotency UNIQUE (idempotency_key);
 ```
 
@@ -485,8 +467,7 @@ CREATE INDEX ix_transaction_ref_run ON transaction((ref->>'run_id')) WHERE ref ?
 
 ```sql
 ALTER TABLE item_base
-  ADD CONSTRAINT pk_item_base PRIMARY KEY (id),
-  ADD CONSTRAINT ck_item_base_slot CHECK (slot BETWEEN 0 AND 5);
+  ADD CONSTRAINT pk_item_base PRIMARY KEY (id);
 
 CREATE INDEX ix_item_base_slot_kind ON item_base(slot, kind);
 ```
@@ -500,13 +481,16 @@ CREATE INDEX ix_item_base_slot_kind ON item_base(slot, kind);
 | `id` | TEXT | NOT NULL | — | PK, slug: `prefix_str_t1` |
 | `affix_type` | SMALLINT | NOT NULL | — | См. §1.5 (0=PREFIX, 1=SUFFIX, 2=IMPLICIT) |
 | `name_key` | TEXT | NOT NULL | — | i18n ключ |
+| `mod_group` | TEXT | NOT NULL | — | Группа взаимной исключаемости. Все tiers одного аффикса делят группу: `prefix_str_t1`/`prefix_str_t2` → `mod_group="str_flat"`. См. PoE-style mutual exclusion. |
 | `min_ilvl` | INT | NOT NULL | `1` | На каком ilvl может появиться |
-| `tier` | INT | NOT NULL | `1` | T1 (низкий) → T5 (высокий) |
-| `weight` | INT | NOT NULL | `100` | Для weighted random |
+| `tier` | INT | NOT NULL | `1` | Display-only (T1 низкий → T10 высокий). НЕ алгоритмический gate — gating через `min_ilvl`. |
+| `weight` | INT | NOT NULL | `100` | Базовый вес для weighted random |
 | `applicable_slots` | JSONB | NOT NULL | — | Массив slot.value: `[2,0]` (weapon, helmet) |
+| `tags` | JSONB | NOT NULL | `'[]'` | Опциональные теги (`["str", "phys"]`). Пока неиспользуемо, оставлено для tag-based crafting в v1. |
+| `spawn_weights` | JSONB | NULL | — | Per-tag override веса (PoE-style). `{"sword":500,"bow":0}`. NULL → используется `weight`. Leftmost match выигрывает (см. `wotk.game.loot.effective_weight`). |
 | `mod_type` | TEXT | NOT NULL | — | `flat_str`, `pct_atk`, `flat_hp`, etc. (открытая таксономия → text) |
-| `value_min` | INT | NOT NULL | — | Нижняя граница ролла |
-| `value_max` | INT | NOT NULL | — | Верхняя граница ролла |
+| `value_min` | INT | NOT NULL | — | Нижняя граница uniform-роллa |
+| `value_max` | INT | NOT NULL | — | Верхняя граница uniform-роллa |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 
 ```sql
@@ -514,10 +498,24 @@ ALTER TABLE affix_definition
   ADD CONSTRAINT pk_affix_definition PRIMARY KEY (id),
   ADD CONSTRAINT ck_affix_type CHECK (affix_type BETWEEN 0 AND 2),
   ADD CONSTRAINT ck_affix_value_range CHECK (value_min <= value_max),
-  ADD CONSTRAINT ck_affix_tier CHECK (tier BETWEEN 1 AND 10);
+  ADD CONSTRAINT ck_affix_tier CHECK (tier BETWEEN 1 AND 10),
+  ADD CONSTRAINT ck_affix_weight_pos CHECK (weight > 0);
 
 CREATE INDEX ix_affix_def_type_ilvl ON affix_definition(affix_type, min_ilvl);
+CREATE INDEX ix_affix_def_modgroup ON affix_definition(mod_group);
+CREATE INDEX ix_affix_def_tags ON affix_definition USING gin(tags);
 ```
+
+**Алгоритм генерации** реализован в `wotk/game/loot.py` (pure functions,
+TDD, 27 тестов). См. `LOOT-DESIGN.md` для дизайн-нот (TODO).
+
+**Ключевые решения:**
+
+* **Mod-group exclusion** через `set[str]` сравнение, без графовой логики.
+* **Tag-based weight override** через `spawn_weights JSONB` (PoE-style leftmost wins).
+* **Uniform value rolling** в `[value_min, value_max]` (не gaussian — см. PoE/D2/LE опыт).
+* **`tier`** только для UI-tooltip'а (icon, color), не алгоритмический фильтр.
+* **`min_ilvl`** — единственный gate по level (без `max_ilvl`, как в PoE 3.0+).
 
 ### 6.3 `item`
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from fastapi import Request
 
 from wotk.core.config import get_settings
@@ -12,7 +14,7 @@ def get_country_from_request(request: Request) -> str | None:
 
     Источники в порядке приоритета:
     1. Cloudflare header `cf-ipcountry`
-    2. Generic `x-country-code` (proxy чейн)
+    2. Generic `x-country-code` (proxy chain)
     3. None (пока не интегрирован MaxMind GeoLite2)
 
     MaxMind GeoLite2 интеграция — Phase 1 W2+, требует mmdb-файл.
@@ -26,9 +28,13 @@ def get_country_from_request(request: Request) -> str | None:
     return None
 
 
+@lru_cache(maxsize=4)
+def _parse_blocked_set(geo_block_str: str) -> frozenset[str]:
+    return frozenset(c.strip().upper() for c in geo_block_str.split(",") if c.strip())
+
+
 def is_country_blocked(country: str | None) -> bool:
     if country is None:
         return False  # неизвестная страна не блокируется (fail-open)
-    settings = get_settings()
-    blocked = {c.strip().upper() for c in settings.geo_block_countries.split(",")}
+    blocked = _parse_blocked_set(get_settings().geo_block_countries)
     return country.upper() in blocked

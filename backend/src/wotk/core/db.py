@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -21,8 +22,13 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _mask_url(url: str) -> str:
+    """Маскирует пароль для логов."""
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)
+
+
 def get_engine() -> AsyncEngine:
-    """Возвращает singleton async engine. Инициализируется лениво."""
+    """Singleton async engine. Инициализируется лениво."""
     global _engine
     if _engine is None:
         settings = get_settings()
@@ -39,7 +45,6 @@ def get_engine() -> AsyncEngine:
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    """Singleton sessionmaker."""
     global _session_factory
     if _session_factory is None:
         _session_factory = async_sessionmaker(
@@ -51,14 +56,8 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency: AsyncSession с автоматическим commit/rollback.
-
-    Использование:
-        @app.get(...)
-        async def handler(session: AsyncSession = Depends(get_session)):
-            ...
-    """
+async def _open_session() -> AsyncIterator[AsyncSession]:
+    """Общий тело: open session, yield, commit on success / rollback on error."""
     factory = get_session_factory()
     async with factory() as session:
         try:
@@ -69,22 +68,11 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
-@asynccontextmanager
-async def session_scope() -> AsyncIterator[AsyncSession]:
-    """Не для FastAPI — для CLI/cron-задач/воркеров.
+# FastAPI dependency: используется как `Depends(get_session)`.
+get_session = _open_session
 
-    Использование:
-        async with session_scope() as session:
-            session.add(obj)
-    """
-    factory = get_session_factory()
-    async with factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+# CLI / cron / воркеры: `async with session_scope() as session:`.
+session_scope = asynccontextmanager(_open_session)
 
 
 async def dispose_engine() -> None:
@@ -95,10 +83,3 @@ async def dispose_engine() -> None:
         _engine = None
         _session_factory = None
         log.info("db_engine_disposed")
-
-
-def _mask_url(url: str) -> str:
-    """Маскирует пароль для логов."""
-    import re
-
-    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)

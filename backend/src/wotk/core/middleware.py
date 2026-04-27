@@ -12,12 +12,16 @@ from starlette.responses import Response
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
+# Только эти ключи биндятся/анбиндятся, чтобы не затирать context от
+# outer middleware (Sentry, OpenTelemetry, etc.)
+_BOUND_KEYS = ("request_id", "method", "path")
+
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Присваивает каждому request уникальный request_id и привязывает в structlog.
+    """Присваивает каждому request уникальный request_id и биндит в structlog.
 
-    Если клиент прислал свой `X-Request-ID` — используем его (иначе генерируем uuid4).
-    Возвращается в response header для tracing.
+    Если клиент прислал свой `X-Request-ID` — используем его. Возвращается
+    в response header для tracing.
     """
 
     async def dispatch(
@@ -29,8 +33,6 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         request_id = incoming if incoming else uuid.uuid4().hex
         request.state.request_id = request_id
 
-        # Биндим в structlog context для всех логов внутри запроса
-        structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             request_id=request_id,
             method=request.method,
@@ -39,6 +41,6 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
         finally:
-            structlog.contextvars.clear_contextvars()
+            structlog.contextvars.unbind_contextvars(*_BOUND_KEYS)
         response.headers[REQUEST_ID_HEADER] = request_id
         return response

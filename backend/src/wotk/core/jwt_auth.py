@@ -39,30 +39,37 @@ def _now() -> int:
     return int(time.time())
 
 
-def issue_access_token(profile_id: int, *, now: int | None = None) -> str:
+def _ttl_for(token_type: TokenType) -> int:
+    settings = get_settings()
+    return (
+        settings.jwt_access_ttl_seconds
+        if token_type == "access"
+        else settings.jwt_refresh_ttl_seconds
+    )
+
+
+def issue_token(
+    profile_id: int, token_type: TokenType, *, now: int | None = None
+) -> str:
+    """Унифицированный builder для access и refresh токенов."""
     settings = get_settings()
     iat = now if now is not None else _now()
     payload: dict[str, Any] = {
         "sub": str(profile_id),
-        "type": "access",
+        "type": token_type,
         "jti": uuid.uuid4().hex,
         "iat": iat,
-        "exp": iat + settings.jwt_access_ttl_seconds,
+        "exp": iat + _ttl_for(token_type),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def issue_access_token(profile_id: int, *, now: int | None = None) -> str:
+    return issue_token(profile_id, "access", now=now)
 
 
 def issue_refresh_token(profile_id: int, *, now: int | None = None) -> str:
-    settings = get_settings()
-    iat = now if now is not None else _now()
-    payload: dict[str, Any] = {
-        "sub": str(profile_id),
-        "type": "refresh",
-        "jti": uuid.uuid4().hex,
-        "iat": iat,
-        "exp": iat + settings.jwt_refresh_ttl_seconds,
-    }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return issue_token(profile_id, "refresh", now=now)
 
 
 def verify_token(

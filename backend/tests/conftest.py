@@ -51,11 +51,13 @@ async def test_engine() -> AsyncIterator[AsyncEngine]:
 
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", _test_database_url())
-    # downgrade сначала на случай предыдущего неуспешного прогона
+    # downgrade сначала на случай предыдущего неуспешного прогона.
+    # Падение здесь некритично (БД может быть пустой), но лог нужен —
+    # иначе потеряем настоящие OperationalError / CommandError.
     try:
         command.downgrade(cfg, "base")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[conftest] alembic downgrade skipped: {e!r}")
     command.upgrade(cfg, "head")
 
     yield engine

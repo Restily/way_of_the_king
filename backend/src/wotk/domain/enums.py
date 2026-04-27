@@ -18,7 +18,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Any, TypeVar
 
-from sqlalchemy import SmallInteger
+from sqlalchemy import CheckConstraint, SmallInteger
 from sqlalchemy.engine import Dialect
 from sqlalchemy.types import TypeDecorator
 
@@ -114,3 +114,21 @@ class IntEnumColumn(TypeDecorator[E]):
 
     def copy(self, **kw: Any) -> "IntEnumColumn[E]":  # noqa: D102, ARG002
         return IntEnumColumn(self.enum_class)
+
+
+def enum_range_check(
+    name: str, column: str, enum_class: type[IntEnum]
+) -> CheckConstraint:
+    """Генерирует CHECK BETWEEN min AND max из значений IntEnum.
+
+    Использование в `__table_args__`:
+        enum_range_check("ck_hero_class", "class", HeroClass)
+
+    При добавлении нового значения в IntEnum CHECK в model автоматически
+    расширяется. Но в проде нужна Alembic-миграция с ALTER CONSTRAINT —
+    миграции иммутабельны, их CHECK не подтягивается из enum.
+    """
+    values = [m.value for m in enum_class]
+    return CheckConstraint(
+        f"{column} BETWEEN {min(values)} AND {max(values)}", name=name
+    )

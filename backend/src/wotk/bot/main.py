@@ -110,8 +110,9 @@ async def _try_record_referral(
 ) -> None:
     """Записываем реферал если код парсится в telegram_id и есть такой профиль.
 
-    Защита: не записываем если referrer == referred, или если у referred
-    уже есть запись (uq_referral_referred ловит).
+    Если referred ещё не создан (приглашённый не успел открыть Mini App) —
+    запись теряется. В v1.x можно ввести pending_referrals для отложенного
+    matching при первом login.
     """
     try:
         referrer_telegram_id = int(referrer_telegram_id_or_code)
@@ -122,41 +123,42 @@ async def _try_record_referral(
     if referrer_telegram_id == referred_telegram_id:
         return
 
-    try:
-        async with session_scope() as session:
-            referrer = await session.scalar(
-                select(Profile).where(Profile.telegram_id == referrer_telegram_id)
-            )
-            if referrer is None:
-                log.info("referral_referrer_not_found", tg_id=referrer_telegram_id)
-                return
-
-            referred = await session.scalar(
-                select(Profile).where(Profile.telegram_id == referred_telegram_id)
-            )
-            if referred is None:
-                # Профиль ещё не создан — это нормально, создастся после login
-                # в Mini App. Тогда мы потеряем эту попытку, но это OK.
-                # В v1.x можно сделать pending_referrals таблицу.
-                log.info("referral_referred_not_found_yet")
-                return
-
-            if referrer.id == referred.id:
-                return
-
-            session.add(
-                Referral(
-                    referrer_profile_id=referrer.id,
-                    referred_profile_id=referred.id,
-                    expires_at=datetime.now(UTC)
-                    + timedelta(days=REFERRAL_WINDOW_DAYS),
+    async with session_scope() as session:
+        profiles = (
+            await session.scalars(
+                select(Profile).where(
+                    Profile.telegram_id.in_(
+                        [referrer_telegram_id, referred_telegram_id]
+                    )
                 )
             )
-    except IntegrityError:
-        log.info(
-            "referral_already_recorded",
-            referred_telegram_id=referred_telegram_id,
+        ).all()
+        by_tg = {p.telegram_id: p for p in profiles}
+        referrer = by_tg.get(referrer_telegram_id)
+        referred = by_tg.get(referred_telegram_id)
+
+        if referrer is None:
+            log.info("referral_referrer_not_found", tg_id=referrer_telegram_id)
+            return
+        if referred is None:
+            log.info("referral_referred_not_found_yet")
+            return
+
+        session.add(
+            Referral(
+                referrer_profile_id=referrer.id,
+                referred_profile_id=referred.id,
+                expires_at=datetime.now(UTC)
+                + timedelta(days=REFERRAL_WINDOW_DAYS),
+            )
         )
+        try:
+            await session.flush()
+        except IntegrityError:
+            log.info(
+                "referral_already_recorded",
+                referred_telegram_id=referred_telegram_id,
+            )
 
 
 async def main() -> None:

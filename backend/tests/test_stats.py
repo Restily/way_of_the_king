@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from wotk.game.stats import BASE_HP, BASE_MANA, BaseStats, compute_derived_stats
-
+from wotk.game.stats import (
+    BASE_HP,
+    BASE_MANA,
+    BaseStats,
+    StatBonuses,
+    WeaponDmg,
+    compute_derived_stats,
+)
 
 KNIGHT_DEFAULT: BaseStats = {"str": 10, "dex": 5, "int": 3}
 
@@ -38,19 +44,14 @@ def test_default_knight_lvl_60() -> None:
 
 def test_with_weapon() -> None:
     derived = compute_derived_stats(
-        KNIGHT_DEFAULT,
-        level=1,
-        weapon_min_dmg=10,
-        weapon_max_dmg=20,
+        KNIGHT_DEFAULT, level=1, weapon=WeaponDmg(min_dmg=10, max_dmg=20)
     )
     # avg = 15, atk = round(15 * (1 + 10*0.02)) = round(15 * 1.2) = 18
     assert derived.atk == 18
 
 
 def test_with_armor() -> None:
-    derived = compute_derived_stats(
-        KNIGHT_DEFAULT, level=1, armor_value=100
-    )
+    derived = compute_derived_stats(KNIGHT_DEFAULT, level=1, armor_value=100)
     # def = round(100 + 10*0.5) = 105
     assert derived.def_ == 105
 
@@ -59,14 +60,15 @@ def test_with_full_kit_bonuses() -> None:
     derived = compute_derived_stats(
         KNIGHT_DEFAULT,
         level=10,
-        weapon_min_dmg=20,
-        weapon_max_dmg=40,
+        weapon=WeaponDmg(min_dmg=20, max_dmg=40),
         armor_value=50,
-        bonus_hp=100,
-        bonus_atk=10,
-        bonus_def=20,
-        bonus_crit_chance=5.0,
-        resist_fire=25,
+        bonuses=StatBonuses(
+            hp=100,
+            atk=10,
+            def_=20,
+            crit_chance=5.0,
+            resist_fire=25,
+        ),
     )
     # HP = 50 + 50 + 100 + 100 = 300
     assert derived.hp == 300
@@ -87,3 +89,8 @@ def test_zero_stats_baseline() -> None:
     assert derived.def_ == 0
     assert derived.crit_chance_pct == 5.0
     assert derived.attack_speed_mult == 1.0
+
+
+def test_weapon_avg_dmg_property() -> None:
+    w = WeaponDmg(min_dmg=10, max_dmg=20)
+    assert w.avg_dmg == 15.0

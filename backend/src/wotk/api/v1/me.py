@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,17 +15,11 @@ from wotk.api.deps import current_profile
 from wotk.core.db import get_session
 from wotk.domain.enums import HeroClass
 from wotk.domain.models import Balance, Hero, Profile
+from wotk.game.energy import compute_regenerated
+from wotk.schemas.profile import ProfileFull
 
+log = structlog.get_logger()
 router = APIRouter(tags=["profile"])
-
-
-class ProfileInfo(BaseModel):
-    id: int
-    locale: str
-    telegram_username: str | None
-    is_admin: bool
-    withdrawal_2fa_enabled: bool
-    created_at: datetime
 
 
 class BalanceInfo(BaseModel):
@@ -45,32 +40,9 @@ class HeroInfo(BaseModel):
 
 
 class MeResponse(BaseModel):
-    profile: ProfileInfo
+    profile: ProfileFull
     balance: BalanceInfo
     hero: HeroInfo | None = None
-
-
-def _regen_energy(balance: Balance) -> None:
-    """Lazy energy регенерация на стороне Python (без SQL-функции).
-
-    1 unit / 6 минут, кап = energy_cap.
-    Прошедшее дробное время сохраняется в energy_updated_at,
-    чтобы не терять регенерацию при чтениях.
-    """
-    if balance.energy >= balance.energy_cap:
-        return
-    now = datetime.now(balance.energy_updated_at.tzinfo)
-    elapsed_seconds = (now - balance.energy_updated_at).total_seconds()
-    full_ticks = int(elapsed_seconds // (6 * 60))
-    if full_ticks <= 0:
-        return
-    balance.energy = min(balance.energy_cap, balance.energy + full_ticks)
-    # Carry-over дробного времени:
-    from datetime import timedelta
-
-    balance.energy_updated_at = balance.energy_updated_at + timedelta(
-        minutes=6 * full_ticks
-    )
 
 
 @router.get("/me", response_model=MeResponse)
@@ -78,18 +50,33 @@ async def get_me(
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
 ) -> MeResponse:
-    balance = await session.get(Balance, profile.id)
-    if balance is None:
-        # Защита: если по какой-то причине баланса нет — создаём
-        balance = Balance(profile_id=profile.id)
-        session.add(balance)
-        await session.flush()
-    _regen_energy(balance)
-
-    hero = await session.scalar(
-        select(Hero)
-        .where(Hero.profile_id == profile.id, Hero.deleted_at.is_(None))
+    # Один JOIN-запрос вместо двух последовательных. Outer join на Hero
+    # покрывает случай "Hero ещё не создан" — получаем (Balance, None).
+    stmt = (
+        select(Balance, Hero)
+        .outerjoin(
+            Hero,
+            (Hero.profile_id == Balance.profile_id) & (Hero.deleted_at.is_(None)),
+        )
+        .where(Balance.profile_id == profile.id)
+        .order_by(Hero.id.asc().nulls_last())
         .limit(1)
+    )
+    row = (await session.execute(stmt)).first()
+    if row is None:
+        # Инвариант: Balance создаётся вместе с Profile в /auth/login.
+        # Отсутствие = баг или ручное удаление, не лечим лениво.
+        log.error("balance_missing_for_profile", profile_id=profile.id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, detail="balance_missing"
+        )
+    balance, hero = row
+
+    # Lazy regen — read-only. Запись в БД только при spend.
+    energy_state = compute_regenerated(
+        energy=balance.energy,
+        energy_cap=balance.energy_cap,
+        energy_updated_at=balance.energy_updated_at,
     )
 
     hero_info: HeroInfo | None = None
@@ -105,19 +92,12 @@ async def get_me(
         )
 
     return MeResponse(
-        profile=ProfileInfo(
-            id=profile.id,
-            locale=profile.locale,
-            telegram_username=profile.telegram_username,
-            is_admin=profile.is_admin,
-            withdrawal_2fa_enabled=profile.withdrawal_2fa_enabled,
-            created_at=profile.created_at,
-        ),
+        profile=ProfileFull.model_validate(profile),
         balance=BalanceInfo(
             gold=balance.gold,
-            energy=balance.energy,
+            energy=energy_state.energy,
             energy_cap=balance.energy_cap,
-            energy_updated_at=balance.energy_updated_at,
+            energy_updated_at=energy_state.energy_updated_at,
         ),
         hero=hero_info,
     )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wotk.api.deps import ensure_not_blocked
 from wotk.core.config import get_settings
 from wotk.core.db import get_session
 from wotk.core.geo import get_country_from_request, is_country_blocked
@@ -25,15 +25,17 @@ from wotk.core.telegram_auth import (
     InitDataError,
     InvalidSignature,
     StaleInitData,
+    TelegramUser,
     verify_init_data,
 )
 from wotk.domain.models import Balance, Profile
+from wotk.schemas.profile import ProfileSummary
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-SUPPORTED_LOCALES = {"ru", "en", "es", "pt", "zh", "ar"}
+SUPPORTED_LOCALES = frozenset({"ru", "en", "es", "pt", "zh", "ar"})
 
 
 class LoginRequest(BaseModel):
@@ -45,22 +47,36 @@ class TokenPair(BaseModel):
     refresh_token: str
 
 
-class UserInfo(BaseModel):
-    id: int
-    locale: str
-    telegram_username: str | None
-    is_admin: bool
-    withdrawal_2fa_enabled: bool
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    user: UserInfo
+class LoginResponse(TokenPair):
+    user: ProfileSummary
 
 
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=4096)
+
+
+def _default_locale_for(tg: TelegramUser) -> str:
+    if tg.language_code in SUPPORTED_LOCALES:
+        return tg.language_code
+    return "ru"
+
+
+def _refresh_denormalized_fields(
+    profile: Profile, tg: TelegramUser, country: str | None
+) -> None:
+    """Обновляет profile.* только если значение реально изменилось.
+
+    Защищает от write amplification: 100k DAU × login каждые 5–10 мин =
+    десятки UPDATE/sec на абсолютно идентичные значения. SQLA dirty-tracking
+    помечает атрибут изменённым на сам факт set-attr, поэтому conditional set.
+    """
+    if profile.telegram_username != tg.username:
+        profile.telegram_username = tg.username
+    if profile.telegram_first_name != tg.first_name:
+        profile.telegram_first_name = tg.first_name
+    if profile.ip_country != country:
+        profile.ip_country = country
+    profile.last_seen_at = datetime.now(UTC)
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -72,7 +88,6 @@ async def login(
 ) -> LoginResponse:
     settings = get_settings()
 
-    # 1. Geo-блок
     country = get_country_from_request(request)
     if is_country_blocked(country):
         log.info(
@@ -80,11 +95,8 @@ async def login(
             country=country,
             ip=request.client.host if request.client else None,
         )
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail="geo_blocked"
-        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="geo_blocked")
 
-    # 2. Валидация initData
     try:
         verified = verify_init_data(
             body.init_data,
@@ -103,64 +115,42 @@ async def login(
 
     tg = verified.user
 
-    # 3. Найти / создать Profile
     profile = await session.scalar(
         select(Profile).where(Profile.telegram_id == tg.id)
     )
 
     if profile is None:
-        # Дефолтный locale = telegram language_code если в whitelist, иначе 'ru'
-        default_locale = (
-            tg.language_code
-            if tg.language_code in SUPPORTED_LOCALES
-            else "ru"
-        )
         profile = Profile(
             telegram_id=tg.id,
             telegram_username=tg.username,
             telegram_first_name=tg.first_name,
-            locale=default_locale,
+            locale=_default_locale_for(tg),
             ip_country=country,
             last_seen_at=datetime.now(UTC),
         )
         session.add(profile)
-        await session.flush()  # получаем profile.id
+        await session.flush()
 
-        # Дефолтный баланс при первом логине
         session.add(Balance(profile_id=profile.id))
         await session.flush()
 
         log.info("profile_created", profile_id=profile.id, country=country)
     else:
-        # Обновляем denormalized данные с каждым логином
-        profile.telegram_username = tg.username
-        profile.telegram_first_name = tg.first_name
-        profile.ip_country = country
-        profile.last_seen_at = datetime.now(UTC)
+        _refresh_denormalized_fields(profile, tg, country)
 
-    if profile.is_blocked:
-        log.info("login_blocked_profile", profile_id=profile.id)
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail="account_blocked"
-        )
+    ensure_not_blocked(profile)
 
     return LoginResponse(
         access_token=issue_access_token(profile.id),
         refresh_token=issue_refresh_token(profile.id),
-        user=UserInfo(
-            id=profile.id,
-            locale=profile.locale,
-            telegram_username=profile.telegram_username,
-            is_admin=profile.is_admin,
-            withdrawal_2fa_enabled=profile.withdrawal_2fa_enabled,
-        ),
+        user=ProfileSummary.model_validate(profile),
     )
 
 
 @router.post("/refresh", response_model=TokenPair)
 @limiter.limit("60/minute")
 async def refresh(
-    request: Request,  # noqa: ARG001 — нужен для slowapi
+    request: Request,  # noqa: ARG001 — нужен для slowapi key_func
     body: RefreshRequest,
     session: AsyncSession = Depends(get_session),
 ) -> TokenPair:
@@ -176,10 +166,7 @@ async def refresh(
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, detail="profile_not_found"
         )
-    if profile.is_blocked:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail="account_blocked"
-        )
+    ensure_not_blocked(profile)
 
     return TokenPair(
         access_token=issue_access_token(profile.id),

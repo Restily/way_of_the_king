@@ -7,7 +7,6 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,9 +19,11 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/heroes", tags=["hero"])
 
 
-# Дефолтные знания Knight на старте — 4 скилла в hotbar
-KNIGHT_DEFAULT_SKILLS = ["cleave", "shield_bash", "whirlwind", "charge"]
-KNIGHT_DEFAULT_BASE_STATS = {"str": 10, "dex": 5, "int": 3}
+# Дефолтные знания Knight на старте — 4 скилла в hotbar.
+# base_stats / unspent_points = server_default из Hero модели.
+KNIGHT_DEFAULT_SKILLS = ("cleave", "shield_bash", "whirlwind", "charge")
+
+ERROR_HERO_EXISTS = "HERO_ALREADY_EXISTS"
 
 
 class CreateHeroRequest(BaseModel):
@@ -45,41 +46,29 @@ async def create_hero(
     body: CreateHeroRequest,
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,  # noqa: ARG001
+    idempotency_key: Annotated[  # noqa: ARG001 — wired для logger context на W2
+        str | None, Header(alias="Idempotency-Key")
+    ] = None,
 ) -> HeroCreated:
-    """В MVP создаётся только Knight, max 1 на профиль."""
-    # Проверка существующего hero (для понятной 409 вместо IntegrityError)
-    existing = await session.scalar(
-        select(Hero).where(
-            Hero.profile_id == profile.id,
-            Hero.hero_class == HeroClass.KNIGHT,
-            Hero.deleted_at.is_(None),
-        )
-    )
-    if existing is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="HERO_ALREADY_EXISTS"
-        )
-
+    """В MVP создаётся только Knight, max 1 на профиль (uq_hero_profile_class)."""
     hero = Hero(
         profile_id=profile.id,
         hero_class=HeroClass.KNIGHT,
         name=body.name,
-        base_stats=dict(KNIGHT_DEFAULT_BASE_STATS),
         active_skills=list(KNIGHT_DEFAULT_SKILLS),
     )
     session.add(hero)
     try:
         await session.flush()
     except IntegrityError as e:
-        # Race-condition: параллельный запрос успел создать
         await session.rollback()
-        log.info("hero_create_race", profile_id=profile.id)
         raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="HERO_ALREADY_EXISTS"
+            status.HTTP_409_CONFLICT, detail=ERROR_HERO_EXISTS
         ) from e
 
-    log.info("hero_created", profile_id=profile.id, hero_id=hero.id, name=hero.name)
+    log.info(
+        "hero_created", profile_id=profile.id, hero_id=hero.id, name=hero.name
+    )
     return HeroCreated(
         id=hero.id,
         hero_class=hero.hero_class,

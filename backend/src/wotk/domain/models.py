@@ -32,7 +32,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from wotk.domain.enums import HeroClass, IntEnumColumn, TransactionType
+from wotk.domain.enums import (
+    HeroClass,
+    IntEnumColumn,
+    TransactionType,
+    enum_range_check,
+)
 
 # ============================================================================
 # Base
@@ -192,7 +197,7 @@ class Hero(Base):
     deleted_at: Mapped[datetime | None] = _ts_column(default_now=False, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("class BETWEEN 0 AND 2", name="ck_hero_class"),
+        enum_range_check("ck_hero_class", "class", HeroClass),
         CheckConstraint("level BETWEEN 1 AND 100", name="ck_hero_level"),
         CheckConstraint("xp >= 0", name="ck_hero_xp"),
         CheckConstraint(
@@ -293,7 +298,7 @@ class Transaction(Base):
     created_at: Mapped[datetime] = _ts_column()
 
     __table_args__ = (
-        CheckConstraint("type BETWEEN 0 AND 22", name="ck_transaction_type"),
+        enum_range_check("ck_transaction_type", "type", TransactionType),
         UniqueConstraint("idempotency_key", name="uq_transaction_idempotency"),
         Index(
             "ix_transaction_profile_created",

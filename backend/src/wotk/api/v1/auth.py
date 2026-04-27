@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -118,6 +118,7 @@ def _refresh_denormalized_fields(
 @limiter.limit("20/minute")
 async def login(
     request: Request,
+    response: Response,  # noqa: ARG001 — slowapi injects rate-limit headers
     body: LoginRequest,
     session: AsyncSession = Depends(get_session),
     validator: TelegramInitDataValidator = Depends(get_telegram_validator),
@@ -222,7 +223,8 @@ async def login(
 @router.post("/refresh", response_model=TokenPair)
 @limiter.limit("60/minute")
 async def refresh(
-    request: Request,  # noqa: ARG001 — нужен для slowapi key_func
+    request: Request,  # noqa: ARG001 — slowapi key_func
+    response: Response,  # noqa: ARG001 — slowapi injects rate-limit headers
     body: RefreshRequest,
     session: AsyncSession = Depends(get_session),
     jwt_service: JwtService = Depends(get_jwt_service),

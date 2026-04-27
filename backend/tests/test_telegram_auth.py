@@ -79,8 +79,11 @@ def test_verify_rejects_empty(
 def test_verify_rejects_missing_user_id(
     validator: TelegramInitDataValidator,
 ) -> None:
-    init_data = build_init_data(bot_token=BOT_TOKEN)
-    init_data = init_data.replace("%22id%22%3A12345", "%22id%22%3Anull")
+    # Build initData с user.id = None — должно подписаться корректно,
+    # validator поймает на проверке "id is missing/null".
+    init_data = build_init_data(
+        bot_token=BOT_TOKEN, user_extra={"id": None}
+    )
     with pytest.raises(MalformedInitData):
         validator.verify(init_data)
 

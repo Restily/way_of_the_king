@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info("shutdown")
 
 
-def _rate_limit_handler(_request, exc: RateLimitExceeded) -> JSONResponse:
+def _rate_limit_handler(_request: Request, exc: RateLimitExceeded) -> JSONResponse:
     """SlowAPI exception handler для ответа 429 в JSON-формате.
 
     :param _request: Starlette Request (не используется).
@@ -112,7 +112,7 @@ def create_app() -> FastAPI:
 
     # Rate limiting
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_handler) # type: ignore
     app.add_middleware(SlowAPIMiddleware)
 
     # Request-ID middleware (после rate limiter — чтобы 429 ответы тоже имели ID)

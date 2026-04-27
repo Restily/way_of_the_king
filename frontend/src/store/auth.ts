@@ -7,7 +7,7 @@
 import { create } from 'zustand';
 
 import { type ProfileSummary, login as apiLogin, refresh as apiRefresh } from '../api/auth';
-import { ApiError, configureClient } from '../api/client';
+import { configureClient } from '../api/client';
 import { type HeroCreated } from '../api/heroes';
 import { type MeResponse, getMe as apiGetMe } from '../api/me';
 import { toErrorCode } from '../lib/errors';

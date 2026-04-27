@@ -460,7 +460,7 @@ CREATE INDEX ix_transaction_type_created ON transaction(type, created_at DESC);
 CREATE INDEX ix_transaction_ref_run ON transaction((ref->>'run_id')) WHERE ref ? 'run_id';
 ```
 
-**Партиционирование:** по месяцу (`PARTITION BY RANGE (created_at)`). Таблица растёт быстро, при 100k DAU = миллионы записей в день. См. раздел 14.
+**Партиционирование:** в MVP — обычная таблица, PRIMARY KEY (id). Партиционирование по `created_at` отложено до достижения ~10M+ строк или ~50k DAU (план в §14). Возврат потребует backfill-миграции с переносом существующих данных.
 
 ---
 

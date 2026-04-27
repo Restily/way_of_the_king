@@ -31,8 +31,15 @@ async def client(
     )
 
     async def override_get_session():
+        # Зеркалим production-семантику wotk.core.db._open_session:
+        # commit on success, rollback on exception.
         async with test_factory() as session:
-            yield session
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     app.dependency_overrides[get_session] = override_get_session
 

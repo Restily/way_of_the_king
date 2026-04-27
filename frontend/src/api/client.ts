@@ -2,8 +2,8 @@
  * Fetch wrapper для бэкенда.
  *
  * Подмешивает Authorization Bearer токен из auth store, на 401 пытается
- * рефрешнуть. Если рефреш не удался — выбрасывает ApiError, и auth store
- * уйдёт в unauthenticated.
+ * рефрешнуть. Если рефреш не привёл к новому access token — выбрасывает
+ * ApiError, и UI переходит в unauthenticated.
  */
 
 export class ApiError extends Error {
@@ -31,8 +31,9 @@ export function configureClient(next: ClientHooks): void {
   hooks = next;
 }
 
-export interface FetchOptions extends Omit<RequestInit, 'body'> {
+export interface FetchOptions extends Omit<RequestInit, 'body' | 'headers'> {
   body?: unknown;
+  headers?: Record<string, string>;
   /** false = пропустить Authorization header (для login/refresh). */
   auth?: boolean;
   /** false = не пытаться refresh на 401. */
@@ -51,17 +52,13 @@ export async function apiFetch<T>(
     ...rest
   } = options;
 
-  const finalHeaders: Record<string, string> = {
-    ...(headers as Record<string, string> | undefined),
-  };
+  const finalHeaders: Record<string, string> = { ...headers };
   if (body !== undefined && !finalHeaders['Content-Type']) {
     finalHeaders['Content-Type'] = 'application/json';
   }
   if (auth) {
     const token = hooks.getAccessToken();
-    if (token) {
-      finalHeaders.Authorization = `Bearer ${token}`;
-    }
+    if (token) finalHeaders.Authorization = `Bearer ${token}`;
   }
 
   const response = await fetch(path, {
@@ -77,6 +74,10 @@ export async function apiFetch<T>(
 
   if (response.status === 401 && auth && retryOnUnauthorized) {
     await hooks.onUnauthorized();
+    // Если refresh не вернул новый токен — нет смысла идти на бэкенд снова.
+    if (!hooks.getAccessToken()) {
+      throw new ApiError(401, 'unauthenticated');
+    }
     return apiFetch<T>(path, { ...options, retryOnUnauthorized: false });
   }
 
@@ -86,7 +87,7 @@ export async function apiFetch<T>(
       const errBody = (await response.json()) as { detail?: string; error?: string };
       detail = errBody.detail ?? errBody.error;
     } catch {
-      // body не JSON — игнорируем
+      /* body не JSON — игнорируем */
     }
     throw new ApiError(response.status, detail ?? 'request_failed');
   }

@@ -113,7 +113,7 @@ input {
   color: var(--text);
   font-size: 1rem;
   outline: none;
-  transition: border-color 120ms;
+  transition: border-color 120ms ease;
 }
 
 .form__input:focus {
@@ -133,7 +133,11 @@ input {
   color: var(--text);
   padding: 0.875rem 1.5rem;
   font-size: 1rem;
-  transition: all 120ms;
+  /* Перечисляем явно — `all` триггерит compositor на любое property change. */
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
 }
 
 .btn:not(:disabled):active {

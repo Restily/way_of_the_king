@@ -1,22 +1,25 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { createHero } from '../api/heroes';
-import { ApiError } from '../api/client';
-import type { HeroCreated } from '../api/heroes';
+import { toErrorCode } from '../lib/errors';
 import { hapticNotify } from '../lib/telegram';
+import { useAuthStore } from '../store/auth';
 
-interface Props {
-  onCreated: (hero: HeroCreated) => void;
-}
-
-export function CreateHero({ onCreated }: Props) {
+export function CreateHero() {
   const { t } = useTranslation();
+  const applyHero = useAuthStore((s) => s.applyHero);
+
+  // Один и тот же ключ на форму — повторный submit с тем же payload
+  // backend увидит как retry, не как два независимых create.
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
+
   const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<string | null>(null);
 
-  const isValid = name.trim().length >= 3 && name.trim().length <= 20;
+  const trimmed = name.trim();
+  const isValid = trimmed.length >= 3 && trimmed.length <= 20;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,22 +27,12 @@ export function CreateHero({ onCreated }: Props) {
     setSubmitting(true);
     setErrorCode(null);
     try {
-      const hero = await createHero(name.trim());
+      const hero = await createHero(trimmed, idempotencyKeyRef.current);
       hapticNotify('success');
-      onCreated(hero);
+      applyHero(hero);
     } catch (err) {
       hapticNotify('error');
-      if (err instanceof ApiError) {
-        if (err.detail === 'HERO_ALREADY_EXISTS') {
-          setErrorCode('hero_already_exists');
-        } else if (err.status === 422) {
-          setErrorCode('name_too_short');
-        } else {
-          setErrorCode('generic');
-        }
-      } else {
-        setErrorCode('network');
-      }
+      setErrorCode(toErrorCode(err));
     } finally {
       setSubmitting(false);
     }
@@ -63,7 +56,6 @@ export function CreateHero({ onCreated }: Props) {
             placeholder={t('create_hero.name_placeholder')}
             minLength={3}
             maxLength={20}
-            autoFocus
             disabled={submitting}
           />
         </label>

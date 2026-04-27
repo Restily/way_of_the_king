@@ -6,10 +6,13 @@ export interface HeroCreated extends HeroInfo {
   active_skills: string[];
 }
 
-export function createHero(name: string): Promise<HeroCreated> {
+export function createHero(
+  name: string,
+  idempotencyKey: string,
+): Promise<HeroCreated> {
   return apiFetch<HeroCreated>('/api/v1/heroes', {
     method: 'POST',
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: { name },
   });
 }

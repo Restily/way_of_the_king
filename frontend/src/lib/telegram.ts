@@ -23,8 +23,18 @@ interface TelegramUser {
   first_name?: string;
 }
 
-interface CloudStorageCallback {
-  (err: Error | null, value?: string | boolean): void;
+type GetItemCallback = (err: Error | null, value: string | null) => void;
+type WriteCallback = (err: Error | null, ok?: boolean) => void;
+
+interface CloudStorage {
+  setItem: (key: string, value: string, cb?: WriteCallback) => void;
+  getItem: (key: string, cb: GetItemCallback) => void;
+  removeItem: (key: string, cb?: WriteCallback) => void;
+}
+
+interface HapticFeedback {
+  impactOccurred: (style: 'light' | 'medium' | 'heavy') => void;
+  notificationOccurred: (type: 'error' | 'success' | 'warning') => void;
 }
 
 interface TelegramWebApp {
@@ -36,15 +46,8 @@ interface TelegramWebApp {
   colorScheme: 'light' | 'dark';
   viewportHeight: number;
   viewportStableHeight: number;
-  HapticFeedback?: {
-    impactOccurred: (style: 'light' | 'medium' | 'heavy') => void;
-    notificationOccurred: (type: 'error' | 'success' | 'warning') => void;
-  };
-  CloudStorage?: {
-    setItem: (key: string, value: string, cb?: CloudStorageCallback) => void;
-    getItem: (key: string, cb: CloudStorageCallback) => void;
-    removeItem: (key: string, cb?: CloudStorageCallback) => void;
-  };
+  HapticFeedback?: HapticFeedback;
+  CloudStorage?: CloudStorage;
 }
 
 declare global {
@@ -52,6 +55,8 @@ declare global {
     Telegram?: { WebApp: TelegramWebApp };
   }
 }
+
+export type { CloudStorage, GetItemCallback, TelegramWebApp, WriteCallback };
 
 export function getTelegramWebApp(): TelegramWebApp | undefined {
   return window.Telegram?.WebApp;

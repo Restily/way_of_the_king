@@ -5,7 +5,12 @@ import { initReactI18next } from 'react-i18next';
 import en from './en.json';
 import ru from './ru.json';
 
-export const SUPPORTED_LOCALES = ['ru', 'en', 'es', 'pt', 'zh', 'ar'] as const;
+/**
+ * Активные локали. Расширяется по мере появления переводов.
+ * Убедись что порядок имён совпадает с файлами в этой директории + регистрацией
+ * в `resources` ниже.
+ */
+export const SUPPORTED_LOCALES = ['ru', 'en'] as const;
 export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number];
 
 void i18n
@@ -17,7 +22,7 @@ void i18n
       en: { translation: en },
     },
     fallbackLng: 'ru',
-    supportedLngs: ['ru', 'en'],
+    supportedLngs: SUPPORTED_LOCALES,
     interpolation: { escapeValue: false },
     detection: {
       order: ['localStorage', 'navigator'],

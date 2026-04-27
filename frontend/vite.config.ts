@@ -19,13 +19,19 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    sourcemap: true,
+    // 'hidden' = sourcemap файл создаётся, но НЕ ссылается из bundle.
+    // Можем загружать в Sentry для server-side decode, без публичного link'а.
+    sourcemap: process.env.NODE_ENV === 'production' ? 'hidden' : true,
+    chunkSizeWarningLimit: 250,
     rollupOptions: {
       output: {
+        // ВНИМАНИЕ: pixi/tonconnect должны импортироваться ТОЛЬКО внутри
+        // lazy-loaded screens (React.lazy → import()), иначе они попадут
+        // в основной bundle и убьют first paint.
         manualChunks: {
-          'pixi': ['pixi.js', '@pixi/tilemap'],
-          'react': ['react', 'react-dom'],
-          'i18n': ['i18next', 'react-i18next'],
+          pixi: ['pixi.js', '@pixi/tilemap'],
+          react: ['react', 'react-dom'],
+          i18n: ['i18next', 'react-i18next', 'i18next-browser-languagedetector'],
         },
       },
     },

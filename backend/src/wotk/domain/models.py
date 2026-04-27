@@ -1,13 +1,15 @@
-"""SQLAlchemy 2.0 модели для §1-§5 DATABASE.md.
+"""SQLAlchemy 2.0 модели для §1-§5 :file:`docs/DATABASE.md`.
 
 Скоуп MVP:
-- §3.1 Profile
-- §3.2 Referral
-- §4.1 Hero
-- §5.1 Balance
-- §5.2 Transaction
 
-Item / ItemBase / AffixDefinition (§6) и далее — добавляются в соответствующих фазах.
+* §3.1 :class:`Profile`
+* §3.2 :class:`Referral`
+* §4.1 :class:`Hero`
+* §5.1 :class:`Balance`
+* §5.2 :class:`Transaction`
+
+:class:`Item` / :class:`ItemBase` / :class:`AffixDefinition` (§6) и далее —
+добавляются в соответствующих фазах.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from wotk.domain.enums import (
     HeroClass,
@@ -45,18 +47,27 @@ from wotk.domain.enums import (
 
 
 class Base(DeclarativeBase):
-    """Корневой DeclarativeBase для всех моделей."""
+    """Корневой :class:`DeclarativeBase` для всех моделей.
+
+    Содержит ``type_annotation_map`` для автоматического маппинга
+    Python-типов в SQLAlchemy-колонки (dict → JSONB, list → JSONB).
+    """
 
     type_annotation_map = {  # noqa: RUF012
-        # Default mapping for built-in types
         dict[str, Any]: JSONB,
         list[Any]: JSONB,
     }
 
 
-# Шорткат для частых типов колонок
 def _ts_column(*, default_now: bool = True, nullable: bool = False) -> Any:
-    """TIMESTAMPTZ колонка с server_default=now() при default_now=True."""
+    """Helper для TIMESTAMPTZ-колонки с ``server_default=now()``.
+
+    Сокращает повторяющиеся аргументы ``mapped_column(DateTime(timezone=True), …)``.
+
+    :param default_now: Если ``True`` — добавляет ``server_default=now()``.
+    :param nullable: Разрешён ли NULL.
+    :returns: SQLAlchemy ``mapped_column`` instance.
+    """
     kwargs: dict[str, Any] = {"nullable": nullable}
     if default_now:
         kwargs["server_default"] = func.now()
@@ -69,7 +80,15 @@ def _ts_column(*, default_now: bool = True, nullable: bool = False) -> Any:
 
 
 class Profile(Base):
-    """Главная таблица аккаунтов. Один Telegram-юзер = одна запись."""
+    """Главная таблица аккаунтов. Один Telegram-юзер = одна запись.
+
+    Создаётся автоматически в ``POST /auth/login`` при первом входе.
+    Связь с Telegram через unique ``telegram_id``.
+
+    Денормализованные поля (``telegram_username``, ``telegram_first_name``,
+    ``ip_country``) обновляются на каждом login — но через conditional set,
+    чтобы не плодить пустые UPDATE.
+    """
 
     __tablename__ = "profile"
 
@@ -120,16 +139,28 @@ class Profile(Base):
 
 
 class Referral(Base):
-    """Реферальная программа. Учитывает только подтверждённых рефералов."""
+    """Реферальная программа. Учитывает только подтверждённых рефералов.
+
+    ``referred_profile_id`` — UNIQUE: один профиль можно пригласить только
+    один раз (защищает от двойных бонусов). ``confirmed_at`` ставится после
+    прохождения tutorial.
+
+    Окно начислений 30 дней (``expires_at``) — после этого реферрер
+    перестаёт получать % с дохода реферала.
+    """
 
     __tablename__ = "referral"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     referrer_profile_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("profile.id", name="fk_referral_referrer"), nullable=False
+        BigInteger,
+        ForeignKey("profile.id", name="fk_referral_referrer"),
+        nullable=False,
     )
     referred_profile_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("profile.id", name="fk_referral_referred"), nullable=False
+        BigInteger,
+        ForeignKey("profile.id", name="fk_referral_referred"),
+        nullable=False,
     )
     confirmed_at: Mapped[datetime | None] = _ts_column(default_now=False, nullable=True)
     bonus_paid_gold: Mapped[int] = mapped_column(
@@ -157,7 +188,21 @@ class Referral(Base):
 
 
 class Hero(Base):
-    """Игровой персонаж (knight в MVP, archer/necromancer постMVP)."""
+    """Игровой персонаж (knight в MVP, archer/necromancer постMVP).
+
+    Связь 1:N с :class:`Profile` через ``profile_id`` ON DELETE CASCADE.
+    Партиал-уникальный индекс ``uq_hero_profile_class`` гарантирует
+    "не более одного hero определённого класса на профиль".
+
+    JSONB-колонки (``base_stats``, ``unspent_points``, ``passives``,
+    ``active_skills``) — для гибкости. Аналитика по их содержимому пока
+    не нужна; если потребуется — выделим в отдельные таблицы.
+
+    ``level`` — денормализованная копия ``compute_level(xp)`` для индексов
+    и быстрых leaderboard-запросов. Source of truth — функция
+    :func:`wotk.game.leveling.compute_level`. При изменении ``xp``
+    обязательно пересчитывать ``level`` в той же транзакции (см. apply_xp).
+    """
 
     __tablename__ = "hero"
 
@@ -167,7 +212,7 @@ class Hero(Base):
         ForeignKey("profile.id", ondelete="CASCADE", name="fk_hero_profile"),
         nullable=False,
     )
-    # SQLAlchemy reserved name — column DB-name "class" через первый аргумент
+    # SQLAlchemy reserved name — column DB-name "class" через первый аргумент.
     hero_class: Mapped[HeroClass] = mapped_column(
         "class", IntEnumColumn(HeroClass), nullable=False
     )
@@ -238,7 +283,18 @@ class Hero(Base):
 
 
 class Balance(Base):
-    """Балансы и энергия профиля. Только GOLD в MVP."""
+    """Балансы и энергия профиля. Только GOLD в MVP.
+
+    Создаётся автоматически с :class:`Profile` в ``/auth/login``.
+    PK = ``profile_id`` (1:1 связь с Profile, ON DELETE CASCADE).
+
+    ``gold`` хранится в "копейках" (1 UI gold = 1000 в БД) — позволяет
+    bigint-арифметику без дробей.
+
+    ``energy`` использует lazy regen pattern (см. :func:`wotk.game.energy.compute_regenerated`):
+    значение в БД отстаёт от "реального", актуальное вычисляется при чтении.
+    Запись только при spend-операциях.
+    """
 
     __tablename__ = "balance"
 
@@ -273,11 +329,19 @@ class Balance(Base):
 
 
 class Transaction(Base):
-    """Аудит-лог движений gold. Каждое изменение balance.gold = запись здесь.
+    """Аудит-лог движений gold. Каждое изменение ``balance.gold`` = запись здесь.
 
-    Имя таблицы `transaction` — non-reserved в PG, SA квотирует автоматически.
-    Партиционирование (PARTITION BY RANGE created_at) добавляется в Alembic-миграции,
-    не в модели.
+    Имя таблицы ``transaction`` — non-reserved в PG, SA квотирует автоматически.
+    Партиционирование (``PARTITION BY RANGE created_at``) реализовано
+    в Alembic-миграции (``op.execute("CREATE TABLE … PARTITION BY …")``),
+    не в модели — SA не поддерживает это в ORM-DDL.
+
+    Колонка ``balance_after`` = defensive copy: позволяет reconciliation
+    cron быстро находить расхождения (``balance.gold`` vs
+    ``last transaction.balance_after``).
+
+    Колонка ``currency`` отсутствует — таблица хранит только GOLD.
+    WOTK accounting в ``deposit`` / ``withdrawal``.
     """
 
     __tablename__ = "transaction"

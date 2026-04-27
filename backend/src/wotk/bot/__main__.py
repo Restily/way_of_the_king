@@ -1,4 +1,7 @@
-"""Entrypoint для `python -m wotk.bot`."""
+"""Entrypoint для ``python -m wotk.bot``.
+
+Запускает aiogram polling через :func:`wotk.bot.main.main`.
+"""
 
 from __future__ import annotations
 

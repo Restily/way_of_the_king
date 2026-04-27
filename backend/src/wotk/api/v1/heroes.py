@@ -1,4 +1,4 @@
-"""POST /api/v1/heroes — создание Knight в MVP."""
+"""POST /api/v1/heroes — создание hero (Knight в MVP)."""
 
 from __future__ import annotations
 
@@ -19,18 +19,37 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/heroes", tags=["hero"])
 
 
-# Дефолтные знания Knight на старте — 4 скилла в hotbar.
-# base_stats / unspent_points = server_default из Hero модели.
+#: Дефолтные знания Knight на старте — 4 скилла в hotbar.
+#: ``base_stats`` / ``unspent_points`` берутся из ``server_default`` в Hero модели.
 KNIGHT_DEFAULT_SKILLS = ("cleave", "shield_bash", "whirlwind", "charge")
 
+#: Код ошибки 409 при попытке создать второго hero на профиль.
 ERROR_HERO_EXISTS = "HERO_ALREADY_EXISTS"
 
 
 class CreateHeroRequest(BaseModel):
+    """Тело запроса POST /heroes.
+
+    :cvar name: Имя персонажа, 3..20 символов. Совпадает с
+        ``ck_hero_name_len`` CHECK constraint.
+    """
+
     name: str = Field(min_length=3, max_length=20)
 
 
 class HeroCreated(BaseModel):
+    """Ответ на успешное создание hero.
+
+    :cvar id: PK созданного персонажа.
+    :cvar hero_class: Класс (всегда KNIGHT в MVP).
+    :cvar name: Подтверждённое имя.
+    :cvar level: 1 (стартовый).
+    :cvar xp: 0.
+    :cvar unspent_points: ``{"stat": 0, "skill": 0}``.
+    :cvar base_stats: ``{"str": 10, "dex": 5, "int": 3}``.
+    :cvar active_skills: Список 4 default-скиллов.
+    """
+
     id: int
     hero_class: HeroClass
     name: str
@@ -46,14 +65,30 @@ async def create_hero(
     body: CreateHeroRequest,
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
-    idempotency_key: Annotated[  # noqa: ARG001 — wired для logger context на W2
+    idempotency_key: Annotated[
         str | None,
         # max_length 128 защищает от DoS через гигантский header.
         # UUID = 36 chars, ULID = 26 — 128 c запасом.
         Header(alias="Idempotency-Key", max_length=128),
     ] = None,
 ) -> HeroCreated:
-    """В MVP создаётся только Knight, max 1 на профиль (uq_hero_profile_class)."""
+    """В MVP создаётся только Knight, max 1 на профиль.
+
+    Уникальность гарантируется partial unique index ``uq_hero_profile_class``.
+    Race-condition обрабатывается ловлей ``IntegrityError`` (TOCTOU-safe).
+
+    :param body: :class:`CreateHeroRequest` с именем.
+    :param profile: Авторизованный профиль (через :func:`current_profile`).
+    :param session: Async DB session.
+    :param idempotency_key: ``Idempotency-Key`` header, опционален.
+        В W2 будет использоваться для request-deduplication через
+        ``transaction.idempotency_key``. Сейчас принимается для совместимости
+        с клиентом.
+    :returns: :class:`HeroCreated` с данными нового hero.
+    :raises HTTPException: 409 ``HERO_ALREADY_EXISTS`` если hero уже есть.
+    """
+    _ = idempotency_key  # placeholder для будущей логики
+
     hero = Hero(
         profile_id=profile.id,
         hero_class=HeroClass.KNIGHT,

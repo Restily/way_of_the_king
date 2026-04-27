@@ -12,22 +12,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotk.api.deps import ensure_not_blocked
-from wotk.core.config import get_settings
 from wotk.core.db import get_session
 from wotk.core.geo import get_country_from_request, is_country_blocked
-from wotk.core.jwt_auth import (
-    JwtError,
-    issue_access_token,
-    issue_refresh_token,
-    verify_token,
-)
+from wotk.core.jwt_auth import JwtError, JwtService, get_jwt_service
 from wotk.core.limiter import limiter
 from wotk.core.telegram_auth import (
     InitDataError,
     InvalidSignature,
     StaleInitData,
+    TelegramInitDataValidator,
     TelegramUser,
-    verify_init_data,
+    get_telegram_validator,
 )
 from wotk.domain.models import Balance, Profile
 from wotk.schemas.profile import ProfileSummary
@@ -36,27 +31,58 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+#: Языки, поддерживаемые игрой. Совпадает с CHECK constraint на ``profile.locale``.
 SUPPORTED_LOCALES = frozenset({"ru", "en", "es", "pt", "zh", "ar"})
 
 
 class LoginRequest(BaseModel):
+    """Тело запроса POST /auth/login.
+
+    :cvar init_data: Сырой ``Telegram.WebApp.initData`` querystring.
+        Длина ограничена 8 KB — Telegram гарантирует укладывание в это.
+    """
+
     init_data: str = Field(min_length=1, max_length=8192)
 
 
 class TokenPair(BaseModel):
+    """Пара access + refresh токенов.
+
+    :cvar access_token: Короткоживущий JWT (~1ч).
+    :cvar refresh_token: Долгоживущий JWT (~30 дней).
+    """
+
     access_token: str
     refresh_token: str
 
 
 class LoginResponse(TokenPair):
+    """Ответ на /login: пара токенов + минимальная инфа о юзере.
+
+    :cvar user: :class:`ProfileSummary` для немедленного отображения в UI.
+    """
+
     user: ProfileSummary
 
 
 class RefreshRequest(BaseModel):
+    """Тело запроса POST /auth/refresh.
+
+    :cvar refresh_token: Refresh-JWT, выданный ранее в /login или /refresh.
+    """
+
     refresh_token: str = Field(min_length=1, max_length=4096)
 
 
 def _default_locale_for(tg: TelegramUser) -> str:
+    """Выбрать стартовый locale нового профиля.
+
+    Если ``language_code`` от Telegram входит в :data:`SUPPORTED_LOCALES` —
+    используется он. Иначе fallback на ``ru``.
+
+    :param tg: Распарсенный пользователь Telegram.
+    :returns: ISO-код языка (один из :data:`SUPPORTED_LOCALES`).
+    """
     if tg.language_code in SUPPORTED_LOCALES:
         return tg.language_code
     return "ru"
@@ -65,11 +91,19 @@ def _default_locale_for(tg: TelegramUser) -> str:
 def _refresh_denormalized_fields(
     profile: Profile, tg: TelegramUser, country: str | None
 ) -> None:
-    """Обновляет profile.* только если значение реально изменилось.
+    """Обновляет ``profile.*`` только если значение реально изменилось.
 
     Защищает от write amplification: 100k DAU × login каждые 5–10 мин =
     десятки UPDATE/sec на абсолютно идентичные значения. SQLA dirty-tracking
-    помечает атрибут изменённым на сам факт set-attr, поэтому conditional set.
+    помечает атрибут изменённым при любом ``set-attr``, поэтому conditional
+    set критичен.
+
+    Поле ``last_seen_at`` обновляется всегда — это и есть назначение
+    каждого login'а.
+
+    :param profile: Существующий профиль из БД.
+    :param tg: Свежие данные пользователя из initData.
+    :param country: Страна по ip (или None если не определилась).
     """
     if profile.telegram_username != tg.username:
         profile.telegram_username = tg.username
@@ -86,9 +120,36 @@ async def login(
     request: Request,
     body: LoginRequest,
     session: AsyncSession = Depends(get_session),
+    validator: TelegramInitDataValidator = Depends(get_telegram_validator),
+    jwt_service: JwtService = Depends(get_jwt_service),
 ) -> LoginResponse:
-    settings = get_settings()
+    """Принять ``initData``, создать/обновить профиль, выдать токены.
 
+    Поток:
+
+    1. Geo-block по IP-стране (CF header → MaxMind в v1+).
+    2. HMAC-валидация initData через :class:`TelegramInitDataValidator`.
+    3. ``SELECT profile WHERE telegram_id = …``.
+    4. Если профиль отсутствует → создаём + Balance.
+       При concurrent-login race (IntegrityError) → rollback и
+       подтягиваем существующий.
+    5. Если есть → обновляем denormalized поля (только при изменении).
+    6. Проверка ``is_blocked`` → 403.
+    7. Issue access + refresh JWT.
+
+    Rate-limit: 20 req/min на IP.
+
+    :param request: Starlette Request (нужен slowapi key_func).
+    :param body: Распарсенный :class:`LoginRequest`.
+    :param session: Async DB session.
+    :param validator: Telegram initData validator (через DI).
+    :param jwt_service: JWT issuer (через DI).
+    :returns: :class:`LoginResponse` с парой токенов + summary.
+    :raises HTTPException: 403 при geo-block / blocked-account,
+        401 при невалидной initData,
+        400 при malformed init_data,
+        500 при потере profile race recovery.
+    """
     country = get_country_from_request(request)
     if is_country_blocked(country):
         log.info(
@@ -99,11 +160,7 @@ async def login(
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="geo_blocked")
 
     try:
-        verified = verify_init_data(
-            body.init_data,
-            settings.telegram_bot_token.get_secret_value(),
-            ttl_seconds=settings.telegram_initdata_ttl_seconds,
-        )
+        verified = validator.verify(body.init_data)
     except (InvalidSignature, StaleInitData) as e:
         log.info("login_init_data_invalid", reason=str(e))
         raise HTTPException(
@@ -156,8 +213,8 @@ async def login(
     ensure_not_blocked(profile)
 
     return LoginResponse(
-        access_token=issue_access_token(profile.id),
-        refresh_token=issue_refresh_token(profile.id),
+        access_token=jwt_service.issue_access(profile.id),
+        refresh_token=jwt_service.issue_refresh(profile.id),
         user=ProfileSummary.model_validate(profile),
     )
 
@@ -168,9 +225,23 @@ async def refresh(
     request: Request,  # noqa: ARG001 — нужен для slowapi key_func
     body: RefreshRequest,
     session: AsyncSession = Depends(get_session),
+    jwt_service: JwtService = Depends(get_jwt_service),
 ) -> TokenPair:
+    """Обменять refresh-JWT на новую пару (access + refresh).
+
+    Не делает revocation/rotation в MVP — refresh-токен переиспользуем
+    до его истечения (30 дней). Rate-limit: 60 req/min на IP.
+
+    :param request: Starlette Request (slowapi key_func).
+    :param body: :class:`RefreshRequest` с refresh-токеном.
+    :param session: Async DB session.
+    :param jwt_service: JWT verifier + issuer.
+    :returns: Новая :class:`TokenPair`.
+    :raises HTTPException: 401 при невалидном/истёкшем refresh,
+        403 при заблокированном профиле.
+    """
     try:
-        claims = verify_token(body.refresh_token, expected_type="refresh")
+        claims = jwt_service.verify(body.refresh_token, expected_type="refresh")
     except JwtError as e:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, detail="invalid_refresh"
@@ -184,6 +255,6 @@ async def refresh(
     ensure_not_blocked(profile)
 
     return TokenPair(
-        access_token=issue_access_token(profile.id),
-        refresh_token=issue_refresh_token(profile.id),
+        access_token=jwt_service.issue_access(profile.id),
+        refresh_token=jwt_service.issue_refresh(profile.id),
     )

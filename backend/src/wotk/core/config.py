@@ -3,9 +3,10 @@
 В staging/production environment Pydantic-валидатор отказывается стартовать
 если найдены небезопасные значения (слабые секреты, debug=true, и т.д.).
 
-Все секреты типизированы как `SecretStr` — `repr()` возвращает
-`SecretStr('**********')`, значение не попадает в логи / Sentry / трейсбэки
-случайно. Извлечение через `.get_secret_value()`.
+Все секреты типизированы как :class:`pydantic.SecretStr` —
+``repr()`` возвращает ``SecretStr('**********')``, значение не попадает
+в логи / Sentry / трейсбэки случайно. Извлечение через
+:meth:`SecretStr.get_secret_value`.
 """
 
 from __future__ import annotations
@@ -16,8 +17,9 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Маркеры небезопасных дефолтов в секретах. Если строка содержит любой из них,
-# в staging/production приложение откажется стартовать.
+#: Подстроки которые делают секрет «слабым». Если найдено в значении
+#: длиной < :data:`MIN_SECRET_LENGTH` или содержащем любую из этих подстрок —
+#: в staging/production старт блокируется.
 WEAK_SECRET_MARKERS = (
     "change_me",
     "dev_",
@@ -26,10 +28,17 @@ WEAK_SECRET_MARKERS = (
     "placeholder",
     "replace_me",
 )
+
+#: Минимальная длина значения секрета (байт).
 MIN_SECRET_LENGTH = 32
 
 
 def _is_weak_secret(value: SecretStr | str) -> bool:
+    """Проверка слабости значения по длине и шаблонным подстрокам.
+
+    :param value: Сырая строка или :class:`SecretStr`.
+    :returns: ``True`` если значение слабое (короткое или содержит маркер).
+    """
     raw = value.get_secret_value() if isinstance(value, SecretStr) else value
     if not raw or len(raw) < MIN_SECRET_LENGTH:
         return True
@@ -38,14 +47,35 @@ def _is_weak_secret(value: SecretStr | str) -> bool:
 
 
 def _secret_eq(a: SecretStr, b: SecretStr) -> bool:
+    """Сравнение двух :class:`SecretStr`.
+
+    :param a: Первый секрет.
+    :param b: Второй секрет.
+    :returns: ``True`` если raw-значения идентичны.
+    """
     return a.get_secret_value() == b.get_secret_value()
 
 
 def _secret_empty(value: SecretStr) -> bool:
+    """Пустой ли секрет.
+
+    :param value: Проверяемый секрет.
+    :returns: ``True`` если raw-значение пустая строка.
+    """
     return not value.get_secret_value()
 
 
 class Settings(BaseSettings):
+    """Структура с конфигурацией приложения.
+
+    Загружается из ``.env`` (см. :file:`backend/.env.example`) и переменных
+    окружения. Singleton через :func:`get_settings`.
+
+    Атрибуты-секреты (jwt_secret, telegram_bot_token, internal_hmac_*,
+    hot_wallet_mnemonic, ton_rpc_api_key, sentry_dsn) — типа
+    :class:`SecretStr`, доступ через ``.get_secret_value()``.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -55,7 +85,6 @@ class Settings(BaseSettings):
 
     # === Application ===
     app_env: Literal["development", "staging", "production"] = "development"
-    # Безопасный дефолт: debug=False. Включается ТОЛЬКО явно через env.
     app_debug: bool = False
     log_level: str = "INFO"
 
@@ -68,7 +97,6 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0")
 
     # === CORS ===
-    # Жёсткий allowlist origins для Mini App. Никаких "*".
     cors_origins: list[str] = Field(
         default=[
             "https://t.me",
@@ -78,7 +106,7 @@ class Settings(BaseSettings):
             "https://a.web.telegram.org",
         ]
     )
-    # Доп. origins для локальной разработки. Применяются только в dev.
+    # Доп. origins только для dev (см. effective_cors_origins).
     cors_dev_origins: list[str] = Field(
         default=[
             "http://localhost:5173",
@@ -92,19 +120,17 @@ class Settings(BaseSettings):
     telegram_initdata_ttl_seconds: int = 86400
 
     # === JWT ===
-    # ОБЯЗАТЕЛЬНО задать в env для staging/production. ≥ 32 байта.
     jwt_secret: SecretStr = SecretStr("")
     # Literal — защита от прокидывания "none" или асимметричных алгоритмов
-    # (известная JWT уязвимость).
+    # (известная JWT-уязвимость alg confusion).
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     jwt_access_ttl_seconds: int = 3600
     jwt_refresh_ttl_seconds: int = 2_592_000
     jwt_ws_token_ttl_seconds: int = 30
 
     # === Internal HMAC ===
-    # Разные секреты для разных направлений (defense in depth).
-    # Если realtime скомпрометирован — атакующий не может выдать FastAPI→realtime
-    # admin-команду; и наоборот.
+    # Раздельные секреты для двух направлений (defense in depth):
+    # если realtime скомпрометирован, FastAPI→realtime канал всё ещё доверенный.
     internal_hmac_realtime_to_api: SecretStr = SecretStr("")
     internal_hmac_api_to_realtime: SecretStr = SecretStr("")
 
@@ -130,10 +156,23 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_security(self) -> "Settings":
-        """Жёсткие требования к secrets и опасным настройкам для staging/production.
+        """Жёсткие требования к secrets и опасным настройкам в staging/production.
 
         Падение здесь — by design. Лучше упасть на старте чем работать
         с дырявой конфигурацией.
+
+        Проверки:
+
+        * ``JWT_SECRET`` и оба ``INTERNAL_HMAC_*`` — не weak (см. :data:`WEAK_SECRET_MARKERS`).
+        * ``TELEGRAM_BOT_TOKEN`` — не пустой.
+        * ``APP_DEBUG`` = ``false``.
+        * Два internal HMAC секрета — РАЗНЫЕ.
+        * В production: ``TON_NETWORK`` = ``mainnet``, ``HOT_WALLET_MNEMONIC``
+          и ``WOTK_JETTON_MASTER_ADDRESS`` заполнены.
+
+        :returns: ``self`` без изменений.
+        :raises ValueError: Найдены небезопасные значения. Список проблем —
+            в сообщении исключения.
         """
         if self.app_env not in ("staging", "production"):
             return self
@@ -180,7 +219,13 @@ class Settings(BaseSettings):
 
     @property
     def effective_cors_origins(self) -> list[str]:
-        """Финальный список CORS origins в зависимости от окружения."""
+        """Финальный список CORS origins в зависимости от окружения.
+
+        В development добавляются :attr:`cors_dev_origins` (localhost).
+        В staging/production используется только :attr:`cors_origins`.
+
+        :returns: Список разрешённых origins для CORS middleware.
+        """
         if self.app_env == "development":
             return [*self.cors_origins, *self.cors_dev_origins]
         return self.cors_origins
@@ -188,4 +233,12 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Возвращает singleton-инстанс :class:`Settings`.
+
+    Кэшируется через ``lru_cache``. Тесты перезагружают через
+    ``get_settings.cache_clear()`` после ``monkeypatch.setenv(...)``.
+
+    :returns: Загруженные настройки.
+    :raises ValueError: Если конфигурация небезопасна (см. :meth:`Settings._validate_production_security`).
+    """
     return Settings()

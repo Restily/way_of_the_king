@@ -1,9 +1,10 @@
-"""Telegram бот (aiogram 3) — entrypoint `python -m wotk.bot`.
+"""Telegram бот (aiogram 3) — entrypoint ``python -m wotk.bot``.
 
 В MVP минимальная функциональность:
-- /start [referral_code] — приветствие + кнопка с web_app
-- /help — текст помощи
-- /wallet — placeholder (Phase 7)
+
+* ``/start [referral_code]`` — приветствие + кнопка с web_app
+* ``/help`` — текст помощи
+* ``/wallet`` — placeholder (Phase 7)
 
 Бот живёт отдельным процессом. В docker-compose поднимается вместе с api.
 """
@@ -35,11 +36,19 @@ from wotk.domain.models import Profile, Referral
 log = structlog.get_logger()
 
 
+#: Окно начислений реферальных бонусов в днях.
 REFERRAL_WINDOW_DAYS = 30
+
+#: Префикс реферального кода в deeplink ``?startapp=ref_<telegram_id>``.
 REFERRAL_PREFIX = "ref_"
 
 
 def _build_dispatcher(miniapp_url: str) -> Dispatcher:
+    """Собрать aiogram :class:`Dispatcher` с зарегистрированными handler'ами.
+
+    :param miniapp_url: URL Mini App для кнопки ``Open game``.
+    :returns: Настроенный диспетчер.
+    """
     dp = Dispatcher()
 
     welcome_kb = InlineKeyboardMarkup(
@@ -55,6 +64,7 @@ def _build_dispatcher(miniapp_url: str) -> Dispatcher:
 
     @dp.message(CommandStart(deep_link=True))
     async def start_with_param(message: Message, command: CommandObject) -> None:
+        """``/start <param>`` — обработка приглашения по реферальному коду."""
         if message.from_user is None:
             return
         param = (command.args or "").strip()
@@ -67,6 +77,7 @@ def _build_dispatcher(miniapp_url: str) -> Dispatcher:
 
     @dp.message(CommandStart())
     async def start_plain(message: Message) -> None:
+        """``/start`` без параметра — простое приветствие."""
         await _handle_start(message, None)
 
     async def _handle_start(message: Message, ref_code: str | None) -> None:
@@ -86,6 +97,7 @@ def _build_dispatcher(miniapp_url: str) -> Dispatcher:
 
     @dp.message(F.text == "/help")
     async def help_cmd(message: Message) -> None:
+        """``/help`` — список команд."""
         await message.answer(
             "<b>Команды:</b>\n"
             "/start — открыть игру\n"
@@ -95,6 +107,7 @@ def _build_dispatcher(miniapp_url: str) -> Dispatcher:
 
     @dp.message(F.text == "/wallet")
     async def wallet_cmd(message: Message) -> None:
+        """``/wallet`` — placeholder, реальный функционал в Phase 7."""
         await message.answer(
             "💰 Кошелёк появится в следующем обновлении.\n"
             "Пока что золото копится в игре."
@@ -108,11 +121,18 @@ async def _try_record_referral(
     referrer_telegram_id_or_code: str,
     referred_telegram_id: int,
 ) -> None:
-    """Записываем реферал если код парсится в telegram_id и есть такой профиль.
+    """Записать реферал если код валиден и оба профиля существуют.
 
-    Если referred ещё не создан (приглашённый не успел открыть Mini App) —
-    запись теряется. В v1.x можно ввести pending_referrals для отложенного
+    Если ``referred`` ещё не создан (приглашённый не успел открыть Mini App) —
+    запись теряется. В v1.x можно ввести ``pending_referral`` для отложенного
     matching при первом login.
+
+    Дублирующиеся записи (один и тот же ``referred``) ловятся
+    ``IntegrityError`` от ``uq_referral_referred``.
+
+    :param referrer_telegram_id_or_code: Строковый код из deep-link
+        (без префикса ``ref_``). Должен парситься в int.
+    :param referred_telegram_id: Telegram ID приглашённого юзера.
     """
     try:
         referrer_telegram_id = int(referrer_telegram_id_or_code)
@@ -162,6 +182,14 @@ async def _try_record_referral(
 
 
 async def main() -> None:
+    """Entry point бота: создаёт Bot + Dispatcher и стартует polling.
+
+    В проде должна запускаться отдельным процессом (контейнер ``bot``
+    в docker-compose). Логирует и выходит с кодом 1 если
+    ``TELEGRAM_BOT_TOKEN`` пуст.
+
+    :returns: Ничего (бесконечно polling до SIGTERM).
+    """
     settings = get_settings()
     bot_token = settings.telegram_bot_token.get_secret_value()
     if not bot_token:

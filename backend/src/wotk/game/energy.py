@@ -5,11 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-ENERGY_TICK_SECONDS = 6 * 60  # 1 ед / 6 минут
+#: 1 единица энергии регенерируется каждые 6 минут.
+ENERGY_TICK_SECONDS = 6 * 60
 
 
 @dataclass(frozen=True, slots=True)
 class EnergyState:
+    """Снимок состояния энергии в конкретный момент времени.
+
+    :ivar energy: Текущая энергия (≤ ``energy_cap`` балансера).
+    :ivar energy_updated_at: Метка времени последнего тика
+        (с carry-over дробного времени).
+    """
+
     energy: int
     energy_updated_at: datetime
 
@@ -21,15 +29,27 @@ def compute_regenerated(
     energy_updated_at: datetime,
     now: datetime | None = None,
 ) -> EnergyState:
-    """Возвращает регенерированное состояние без мутации.
+    """Возвращает регенерированное состояние энергии без мутации.
 
     Использование:
-    - На read-эндпоинтах (`/me`) — для отображения, **без записи в БД**.
-    - На spend-эндпоинтах (списание энергии) — внутри одной транзакции:
-      compute → проверить достаточно ли → atomic UPDATE с новым значением.
 
-    Carry-over дробного времени сохраняется в `energy_updated_at` чтобы
-    последующие compute_regenerated не теряли регенерацию.
+    * **На read-эндпоинтах (``/me``)** — для отображения,
+      **без записи в БД**.
+    * **На spend-эндпоинтах** (списание энергии) — внутри одной транзакции:
+      compute → проверить достаточно ли → atomic UPDATE
+      с новым значением.
+
+    Carry-over дробного времени сохраняется в ``energy_updated_at`` чтобы
+    последующие вызовы :func:`compute_regenerated` не теряли регенерацию.
+
+    :param energy: Текущая энергия из БД.
+    :param energy_cap: Максимум для этого юзера.
+    :param energy_updated_at: Когда был последний учёт регена.
+    :param now: Override "сейчас" для тестов. ``None`` →
+        :func:`datetime.now` с TZ от ``energy_updated_at``.
+    :returns: :class:`EnergyState` с обновлёнными значениями.
+        Если регена не было (cap уже достигнут или прошло < 1 тика) —
+        возвращается прежнее состояние.
     """
     if energy >= energy_cap:
         return EnergyState(energy=energy, energy_updated_at=energy_updated_at)

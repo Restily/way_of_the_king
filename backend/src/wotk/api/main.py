@@ -1,4 +1,10 @@
-"""FastAPI entrypoint."""
+"""FastAPI entrypoint.
+
+Создаёт приложение, регистрирует middleware (CORS, RequestId, SlowAPI),
+подключает v1-роутеры, обрабатывает lifespan (Sentry init, DB engine cleanup).
+"""
+
+from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -24,6 +30,21 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """ASGI lifespan: startup/shutdown hooks для FastAPI app.
+
+    Startup:
+
+    * Инициализирует Sentry (если ``SENTRY_DSN`` задан).
+    * Логирует CRITICAL если в non-dev окружении пуст ``SENTRY_DSN``
+      (ошибки не будут отчитываться).
+
+    Shutdown:
+
+    * Закрывает DB engine (отпускает коннекты).
+
+    :param _app: FastAPI app (не используется).
+    :yields: Управление между startup и shutdown.
+    """
     settings = get_settings()
     init_sentry(settings)
     log.info("startup", env=settings.app_env)
@@ -40,6 +61,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 def _rate_limit_handler(_request, exc: RateLimitExceeded) -> JSONResponse:
+    """SlowAPI exception handler для ответа 429 в JSON-формате.
+
+    :param _request: Starlette Request (не используется).
+    :param exc: Исключение от SlowAPI с описанием лимита.
+    :returns: JSON-response 429 с полем ``error`` и ``detail``.
+    """
     return JSONResponse(
         status_code=429,
         content={"error": "rate_limit_exceeded", "detail": str(exc.detail)},
@@ -47,6 +74,14 @@ def _rate_limit_handler(_request, exc: RateLimitExceeded) -> JSONResponse:
 
 
 def create_app() -> FastAPI:
+    """Фабрика FastAPI app.
+
+    Регистрирует middleware (CORS → SlowAPI → RequestId), эндпоинты,
+    v1-роутеры. Скрывает OpenAPI/Swagger в production
+    (не помогаем атакующим перечислить endpoints).
+
+    :returns: Сконфигурированный :class:`FastAPI` инстанс.
+    """
     settings = get_settings()
     is_prod = settings.app_env == "production"
 
@@ -55,8 +90,6 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
         debug=settings.app_debug,
-        # В проде скрываем OpenAPI/Swagger — не помогаем атакующим
-        # перечислить endpoints и схемы.
         openapi_url=None if is_prod else "/openapi.json",
         docs_url=None if is_prod else "/docs",
         redoc_url=None if is_prod else "/redoc",
@@ -87,9 +120,13 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        # Публичный health НЕ раскрывает версию — не помогаем
-        # атакующим таргетить known CVEs. Внутренний health с полной
-        # информацией будет под auth (отдельный эндпоинт).
+        """Публичный health-check.
+
+        Не раскрывает версию — не помогаем атакующим таргетить known CVEs.
+        Внутренний health с полной информацией будет под auth (отдельный эндпоинт).
+
+        :returns: ``{"status": "ok"}``.
+        """
         return {"status": "ok"}
 
     # API v1 routers
@@ -100,4 +137,5 @@ def create_app() -> FastAPI:
     return app
 
 
+#: Module-level FastAPI app instance — entry-point для uvicorn.
 app = create_app()

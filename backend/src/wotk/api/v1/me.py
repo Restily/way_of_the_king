@@ -23,6 +23,14 @@ router = APIRouter(tags=["profile"])
 
 
 class BalanceInfo(BaseModel):
+    """Баланс юзера для UI.
+
+    :cvar gold: Золото в "копейках" (1 UI gold = 1000).
+    :cvar energy: Текущая энергия с уже применённой lazy regen.
+    :cvar energy_cap: Максимум энергии (растёт от пассивок в v1+).
+    :cvar energy_updated_at: Время последнего тика регена.
+    """
+
     gold: int
     energy: int
     energy_cap: int
@@ -30,6 +38,17 @@ class BalanceInfo(BaseModel):
 
 
 class HeroInfo(BaseModel):
+    """Краткая инфа о hero для главного экрана.
+
+    :cvar id: PK персонажа.
+    :cvar hero_class: Класс (knight в MVP).
+    :cvar name: Имя игрока.
+    :cvar level: Текущий уровень (1..100).
+    :cvar xp: Накопленный опыт.
+    :cvar unspent_points: ``{"stat": int, "skill": int}``.
+    :cvar base_stats: Распределённые ``{"str", "dex", "int"}``.
+    """
+
     id: int
     hero_class: HeroClass
     name: str
@@ -40,6 +59,13 @@ class HeroInfo(BaseModel):
 
 
 class MeResponse(BaseModel):
+    """Композит-ответ для GET /me.
+
+    :cvar profile: Полная инфа профиля.
+    :cvar balance: Текущий баланс с актуальной энергией.
+    :cvar hero: Основной hero, либо ``None`` если не создан.
+    """
+
     profile: ProfileFull
     balance: BalanceInfo
     hero: HeroInfo | None = None
@@ -50,6 +76,18 @@ async def get_me(
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
 ) -> MeResponse:
+    """Возвращает данные текущего юзера: профиль, баланс, основной hero.
+
+    Использует один JOIN-запрос для получения Balance + Hero (вместо
+    двух последовательных). Energy регенерируется read-only через
+    :func:`compute_regenerated` — никаких UPDATE на каждый poll.
+
+    :param profile: Профиль из JWT (через :func:`current_profile`).
+    :param session: Async DB session.
+    :returns: :class:`MeResponse` с профилем, балансом и (опционально) hero.
+    :raises HTTPException: 500 если ``Balance`` отсутствует
+        (баг или ручное удаление — инвариант: создаётся с Profile).
+    """
     # Один JOIN-запрос вместо двух последовательных. Outer join на Hero
     # покрывает случай "Hero ещё не создан" — получаем (Balance, None).
     stmt = (

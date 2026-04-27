@@ -10,9 +10,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.responses import JSONResponse
 
+from wotk.api.v1 import auth as auth_v1
+from wotk.api.v1 import heroes as heroes_v1
+from wotk.api.v1 import me as me_v1
 from wotk.core.config import get_settings
 from wotk.core.db import dispose_engine
 from wotk.core.limiter import limiter
+from wotk.core.middleware import RequestIdMiddleware
 from wotk.core.sentry_setup import init_sentry
 
 log = structlog.get_logger()
@@ -78,12 +82,20 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
     app.add_middleware(SlowAPIMiddleware)
 
+    # Request-ID middleware (после rate limiter — чтобы 429 ответы тоже имели ID)
+    app.add_middleware(RequestIdMiddleware)
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         # Публичный health НЕ раскрывает версию — не помогаем
         # атакующим таргетить known CVEs. Внутренний health с полной
         # информацией будет под auth (отдельный эндпоинт).
         return {"status": "ok"}
+
+    # API v1 routers
+    app.include_router(auth_v1.router, prefix="/api/v1")
+    app.include_router(me_v1.router, prefix="/api/v1")
+    app.include_router(heroes_v1.router, prefix="/api/v1")
 
     return app
 

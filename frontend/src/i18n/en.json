@@ -1,0 +1,37 @@
+{
+  "welcome": {
+    "title": "Way Of The King",
+    "loading": "Loading…",
+    "retry": "Try again"
+  },
+  "create_hero": {
+    "title": "Create your knight",
+    "subtitle": "One account — one knight.",
+    "name_label": "Name",
+    "name_placeholder": "Sir Lancelot",
+    "create_button": "Create",
+    "creating": "Creating…"
+  },
+  "city": {
+    "title": "Castle",
+    "hero_summary": "Level {{level}} · {{gold}} gold",
+    "campaign": "Campaign",
+    "inventory": "Inventory",
+    "wallet": "Wallet",
+    "settings": "Settings",
+    "coming_soon": "Coming soon"
+  },
+  "energy": {
+    "label": "Energy {{current}}/{{cap}}"
+  },
+  "errors": {
+    "generic": "Something went wrong",
+    "no_init_data": "Open the game via Telegram",
+    "auth_failed": "Authentication failed",
+    "geo_blocked": "Game is not available in your country",
+    "network": "No connection to the server",
+    "name_too_short": "Name must be 3-20 characters",
+    "hero_already_exists": "Hero already exists",
+    "balance_missing": "Balance not found, contact support"
+  }
+}

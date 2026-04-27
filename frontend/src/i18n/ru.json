@@ -1,0 +1,37 @@
+{
+  "welcome": {
+    "title": "Way Of The King",
+    "loading": "Загрузка…",
+    "retry": "Попробовать ещё раз"
+  },
+  "create_hero": {
+    "title": "Создай своего рыцаря",
+    "subtitle": "Один аккаунт — один рыцарь.",
+    "name_label": "Имя",
+    "name_placeholder": "Сэр Ланселот",
+    "create_button": "Создать",
+    "creating": "Создаём…"
+  },
+  "city": {
+    "title": "Замок",
+    "hero_summary": "Уровень {{level}} · {{gold}} золота",
+    "campaign": "Кампания",
+    "inventory": "Инвентарь",
+    "wallet": "Кошелёк",
+    "settings": "Настройки",
+    "coming_soon": "Скоро"
+  },
+  "energy": {
+    "label": "Энергия {{current}}/{{cap}}"
+  },
+  "errors": {
+    "generic": "Что-то пошло не так",
+    "no_init_data": "Открой игру через Telegram",
+    "auth_failed": "Ошибка авторизации",
+    "geo_blocked": "Игра недоступна в твоей стране",
+    "network": "Нет соединения с сервером",
+    "name_too_short": "Имя должно быть от 3 до 20 символов",
+    "hero_already_exists": "Рыцарь уже создан",
+    "balance_missing": "Баланс не найден, обратись в поддержку"
+  }
+}

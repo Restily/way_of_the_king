@@ -87,54 +87,56 @@
 
 **Новый тикет.** Источник истины — `docs/DATABASE.md` §1.5.
 
-- Создать `backend/src/wotk/domain/enums.py` с `IntEnum` классами:
-  - `CharacterClass` (KNIGHT=0, ARCHER=1, NECROMANCER=2)
-  - `ItemRarity` (COMMON=0..LEGENDARY=4)
-  - `EquipmentSlot` (HELMET=0..RING=5)
-  - `AffixType` (PREFIX=0, SUFFIX=1, IMPLICIT=2)
-  - `TransactionType` (DUNGEON_ENTRY=0..ADMIN_ADJUST=22)
-  - `DungeonTheme`, `DungeonDifficulty`
-  - `RunStatus` (IN_PROGRESS=0..SETTLED=5)
-  - `EncounterResult`, `DepositStatus`, `WithdrawalStatus`, `TreasuryAction`
-  - `AuditEventType`, `AuditSeverity`
-  - `MarketListingStatus`, `PvpSeasonStatus`, `DailyQuestType`
+**Скоуп MVP (§1-§5)** — только enum'ы для таблиц этих секций:
+- `HeroClass` (KNIGHT=0, ARCHER=1, NECROMANCER=2) — из §4 hero
+- `TransactionType` (DUNGEON_ENTRY=0..ADMIN_ADJUST=22) — из §5 transaction
+
+Остальные enum'ы из §1.5 (item.rarity, dungeon_runs.status, deposit.status, etc.) — добавим когда будем работать над их таблицами в следующих фазах.
+
+- Создать `backend/src/wotk/domain/enums.py` с двумя `IntEnum` классами выше
 - Каждое значение задаётся явно (`KNIGHT = 0`, не `KNIGHT = auto()`) — чтобы случайно не сдвинуть после удаления.
-- Unit-тест `tests/test_enums.py`: парсит §1.5 из DATABASE.md и сверяет name+value, падает при расхождении (anti-drift защита).
-- **AC:** все enum'ы определены, тест синхронизации проходит
-- **Estimate:** 1.5ч
+- Unit-тест `tests/test_enums.py`: парсит §1.5 из DATABASE.md и сверяет name+value, падает при расхождении (anti-drift защита). Для MVP — проверять только реализованные enum'ы.
+- **AC:** оба enum'а определены, тест синхронизации проходит
+- **Estimate:** 1ч (раньше было 1.5ч на 16 enum'ов)
 - **Dependencies:** W1-003
 
 ### W1-010 — SQLAlchemy Base + модели MVP `TODO`
 
-Источник истины — `docs/DATABASE.md`. Используем DeclarativeBase 2.0 + `Mapped[T]`.
+Источник истины — `docs/DATABASE.md` §1-§5. Используем DeclarativeBase 2.0 + `Mapped[T]`.
+
+**Скоуп MVP (только §1-§5):**
 
 `backend/src/wotk/domain/models.py`:
-- **`User`**: id, telegram_id, telegram_username, telegram_first_name, locale, ip_country, is_blocked, block_reason, blocked_at, is_admin, withdrawal_2fa_enabled, created_at, updated_at, last_seen_at
-- **`Character`**: id, user_id (FK), class (smallint, mapped to `CharacterClass`), name, level, xp, unspent_points (JSONB `{stat,skill}`), base_stats (JSONB), passives (JSONB), active_skills (JSONB), created_at, updated_at, deleted_at
-- **`Balance`**: user_id (PK+FK), gold, energy, energy_cap, energy_updated_at, updated_at
-- **`Wallet`**: user_id (PK+FK), internal_ton_address, internal_derivation_path, external_ton_address, external_address_set_at, external_address_verified_at, total_deposited_wotk, total_withdrawn_wotk, created_at, updated_at
-- **`Transaction`**: id, user_id (FK), type (smallint, mapped to `TransactionType`), amount, balance_after, ref (JSONB), idempotency_key, created_at
-- **`Referral`**: id, referrer_user_id (FK), referred_user_id (FK), confirmed_at, bonus_paid_gold, expires_at, created_at
+- **`Profile`** (§3.1): id, telegram_id, telegram_username, telegram_first_name, locale, ip_country, is_blocked, block_reason, blocked_at, is_admin, withdrawal_2fa_enabled, created_at, updated_at, last_seen_at
+- **`Referral`** (§3.2): id, referrer_profile_id (FK), referred_profile_id (FK), confirmed_at, bonus_paid_gold, expires_at, created_at
+- **`Hero`** (§4.1): id, profile_id (FK), class (smallint, mapped to `HeroClass`), name, level, xp, unspent_points (JSONB `{stat,skill}`), base_stats (JSONB), passives (JSONB), active_skills (JSONB), is_blocked, created_at, updated_at, deleted_at
+- **`Balance`** (§5.1): profile_id (PK+FK), gold, energy, energy_cap, energy_updated_at, updated_at
+- **`Transaction`** (§5.2): id, profile_id (FK), type (smallint, mapped to `TransactionType`), amount, balance_after, ref (JSONB), idempotency_key, created_at
 
-Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger, ...)` с конвертацией через `TypeDecorator`.
+**НЕ включаем в MVP** (за рамками §1-§5):
+- §6: ItemBase, AffixDefinition, Item — добавим в Phase 5 (loot/inventory)
+- §7: Wallet, Deposit, Withdrawal, TreasuryLog — Phase 7 (TON integration)
+- §8+: dungeons, runs, market, pvp, audit_events и т.д. — соответствующие фазы
+
+Mapping smallint enum'ов: `Mapped[HeroClass] = mapped_column(SmallInteger, ...)` с конвертацией через кастомный `TypeDecorator` (`IntEnumColumn[E]`).
 
 - **AC:** модели импортируются, mypy strict проходит, все enum-колонки типизированы как `Mapped[<EnumClass>]`
-- **Estimate:** 3ч
+- **Estimate:** 2.5ч (раньше было 3ч на 6 моделей; теперь 5)
 - **Dependencies:** W1-004, W1-009
 
 ### W1-011 — Alembic миграции (по плану §16 DATABASE.md) `TODO`
 
-Создать миграции согласно `docs/DATABASE.md` §16. Для MVP (день 2) делаем 0001 + 0003 + 0004:
-- **0001** — users, balances, wallets + триггер `trg_set_updated_at`
-- **0003** — characters (items уберём в более позднюю фазу когда понадобятся)
-- **0004** — transactions (партиционирование с дня 1: `PARTITION BY RANGE (created_at)`, стартовые партиции на 3 месяца вперёд)
-- **0007** — referrals + audit_events skeleton
+Создать миграции согласно `docs/DATABASE.md` §16. **Скоуп MVP §1-§5:**
+- **0001** — profile, balance + триггер `trg_set_updated_at` (wallet отложен до Phase 7)
+- **0002** — referral
+- **0003** — hero
+- **0004** — transaction (партиционирование с дня 1: `PARTITION BY RANGE (created_at)`, стартовые партиции на 3 месяца вперёд) + триггер `trg_profile_block_audit` (хотя audit_events ещё нет — триггер можно отложить до миграции 0007)
 
 Способ: НЕ `--autogenerate` (он может пропускать партиционирование, CHECK с BETWEEN). Писать вручную через Alembic op. Партиционирование — через `op.execute("CREATE TABLE ... PARTITION BY RANGE ...")`.
 
-Все CHECK constraints из DATABASE.md обязательны.
+Все CHECK constraints из DATABASE.md §3-§5 обязательны.
 
-- **AC:** все миграции применяются на пустой БД, downgrade работает, схема визуально совпадает с DATABASE.md (`\d users`, `\d characters` и т.д.)
+- **AC:** все миграции применяются на пустой БД, downgrade работает, схема визуально совпадает с DATABASE.md (`\d profile`, `\d hero`, `\d balance`, `\d "transaction"` и т.д.)
 - **Estimate:** 3ч
 - **Dependencies:** W1-010
 
@@ -148,8 +150,9 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 
 ### W1-013 — Первый интеграционный тест с БД `TODO`
 - pytest fixture: тестовая БД (отдельный namespace или transaction-rollback wrapper)
-- Тест: создать User → создать Balance + Wallet (NULL'ом) → прочитать через session → assert поля совпали
-- Тест: попытка вставить character с class=99 → должна упасть на CHECK constraint
+- Тест: создать Profile → создать Balance → прочитать через session → assert поля совпали
+- Тест: попытка вставить Hero с class=99 → должна упасть на CHECK constraint
+- Тест: попытка двух Hero одного класса для одного profile → должна упасть на partial unique index
 - **AC:** тесты зелёные в CI, БД-фикстура переиспользуется между тестами
 - **Estimate:** 1.5ч
 - **Dependencies:** W1-012
@@ -174,7 +177,7 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 
 ### W1-022 — POST /api/v1/auth/login `TODO`
 - Принимает `{init_data: str}` в body
-- Валидирует initData → находит/создаёт User → создаёт Balance (default `gold=0, energy=100`) и Wallet (NULL внешний адрес) если новый юзер → выдаёт JWT (access + refresh)
+- Валидирует initData → находит/создаёт Profile → создаёт Balance (default `gold=0, energy=100`) если новый юзер → выдаёт JWT (access + refresh). Wallet создаётся в Phase 7 (TON integration).
 - При первом логине: `locale` берётся из `initData.user.language_code` (если в whitelist `ru/en/es/pt/zh/ar`, иначе `ru`); telegram_username и first_name обновляются на каждом login
 - Сохраняет `ip_country` (из `CF-IPCountry` header / MaxMind GeoLite2)
 - Geo-блок: если country в `GEO_BLOCK_COUNTRIES` → 403 + INSERT audit_events с event_type=2 (LOGIN_GEO_BLOCKED)
@@ -194,10 +197,10 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 - **Dependencies:** W1-021, W1-005
 
 ### W1-024 — GET /api/v1/me `TODO`
-- Возвращает структуру `{user, balance, character?}`
-- `user`: id, locale, telegram_username, is_admin, withdrawal_2fa_enabled, created_at
-- `balance`: gold (с прим.lazy regen энергии через `regen_energy_for_user`), energy, energy_cap, energy_updated_at — после регена
-- `character`: первый Knight юзера (или null если не создан)
+- Возвращает структуру `{profile, balance, hero?}`
+- `profile`: id, locale, telegram_username, is_admin, withdrawal_2fa_enabled, created_at
+- `balance`: gold, energy (lazy regen через `regen_energy_for_profile`), energy_cap, energy_updated_at — после регена
+- `hero`: первый Knight профиля (или null если не создан)
 - **AC:** с валидным JWT → 200 с актуальными данными, energy инкрементировался если прошло > 6 минут
 - **Estimate:** 2ч
 - **Dependencies:** W1-023, W1-013
@@ -206,16 +209,16 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 
 ## День 4 (Чт) — Knight creation + бот (~10ч)
 
-### W1-030 — POST /api/v1/characters (Knight only) `TODO`
+### W1-030 — POST /api/v1/heroes (Knight only) `TODO`
 - Body: `{name: str}` (3–20 chars, валидация Pydantic)
 - Header: `Idempotency-Key: <uuid>` (защита от двойного создания)
-- Валидация: `class = CharacterClass.KNIGHT` (0) принудительно в MVP, max 1 character на user (см. partial unique index `uq_characters_user_class`)
-- Создаёт Character со значениями:
+- Валидация: `class = HeroClass.KNIGHT` (0) принудительно в MVP, max 1 hero на profile (см. partial unique index `uq_hero_profile_class`)
+- Создаёт Hero со значениями:
   - `class = 0`, `level = 1`, `xp = 0`
   - `base_stats = {"str":10,"dex":5,"int":3}` (knight defaults)
   - `unspent_points = {"stat":0,"skill":0}`
   - `passives = []`, `active_skills = ["cleave","shield_bash","whirlwind","charge"]` (4 default skills)
-- **AC:** создание возвращает 201 с character, повторное (другая Idempotency-Key) → 409 c кодом `CHARACTER_ALREADY_EXISTS`
+- **AC:** создание возвращает 201 с hero, повторное (другая Idempotency-Key) → 409 c кодом `HERO_ALREADY_EXISTS`
 - **Estimate:** 2ч
 - **Dependencies:** W1-023, W1-009
 
@@ -231,9 +234,9 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 - `wotk/game/leveling.py`:
   - `compute_level(xp: int) -> int` — pure, единственный источник истины
   - `xp_for_level(level: int) -> int` — обратная функция (граница для UI)
-  - `apply_xp(character, gained_xp) -> LevelUpResult` — мутирует character.xp + character.level **в одной транзакции**
+  - `apply_xp(hero, gained_xp) -> LevelUpResult` — мутирует hero.xp + hero.level **в одной транзакции**
 - Level up даёт +3 stat points → инкремент `unspent_points.stat`
-- Корректная обработка multi-level (зашёл лвл 5, получил много XP, стал лвл 8 одним вызовом — даёт 9 stat points)
+- Корректная обработка multi-level (зашёл lvl 5, получил много XP, стал lvl 8 одним вызовом — даёт 9 stat points)
 - Unit-тесты: формула, multi-level, нет потери XP, level всегда == compute_level(xp)
 - **AC:** все edge cases покрыты, инвариант `level == compute_level(xp)` всегда верен
 - **Estimate:** 2ч
@@ -241,15 +244,15 @@ Mapping smallint enum'ов: `Mapped[CharacterClass] = mapped_column(SmallInteger
 ### W1-033 — Bot init (aiogram) `TODO`
 - `wotk/bot/main.py`: aiogram 3 bot, единичный процесс (entrypoint `python -m wotk.bot`)
 - Команды:
-  - `/start [referral_code]` — приветствие + кнопка с `web_app` в Mini App. Если `referral_code` — записать в `referrals` table (если новый юзер)
+  - `/start [referral_code]` — приветствие + кнопка с `web_app` в Mini App. Если `referral_code` — записать в `referral` table (если новый юзер)
   - `/help` — текст помощи
   - `/wallet` — placeholder, будет в Phase 7
 - Все строки через i18n (структура с RU/EN на bot-стороне)
 - **AC:** `/start` → текст + кнопка, кнопка открывает Mini App, deeplink `?startapp=ref_<code>` подхватывается
 - **Estimate:** 2.5ч
 
-### W1-034 — Тесты для character creation `TODO`
-- Integration: автологин (mock initData) → POST /characters {name:"Sir Lancelot"} → GET /me → assert character присутствует с правильными статами
+### W1-034 — Тесты для hero creation `TODO`
+- Integration: автологин (mock initData) → POST /heroes {name:"Sir Lancelot"} → GET /me → assert hero присутствует с правильными статами
 - Тест на повторное создание (idempotency)
 - Тест на класс отличный от knight → 422
 - **AC:** end-to-end сценарий зелёный, regression-защита от багов в base_stats / unspent_points структуре

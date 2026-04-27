@@ -6,6 +6,9 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    // Разрешаем ngrok / cloudflared / loca.lt туннели для local Telegram
+    // Mini App тестирования. В проде фронт отдаёт Caddy, не Vite dev server.
+    allowedHosts: ['.ngrok-free.app', '.ngrok.app', '.trycloudflare.com', '.loca.lt'],
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

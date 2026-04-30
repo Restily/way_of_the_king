@@ -43,24 +43,29 @@ REFERRAL_WINDOW_DAYS = 30
 REFERRAL_PREFIX = "ref_"
 
 
-def _build_dispatcher(miniapp_url: str) -> Dispatcher:
+def _build_dispatcher(miniapp_url: str, fallback_url: str) -> Dispatcher:
     """Собрать aiogram :class:`Dispatcher` с зарегистрированными handler'ами.
 
-    :param miniapp_url: URL Mini App для кнопки ``Open game``.
+    :param miniapp_url: Прямой HTTPS URL Mini App для ``WebAppInfo`` кнопки.
+        Если пустой — используется ``fallback_url`` как обычная URL-кнопка
+        (Telegram ``WebAppInfo`` не принимает ``t.me/...`` — только реальный hosting).
+    :param fallback_url: ``t.me/<bot>/<short_name>`` — открывает Mini App через
+        Telegram-deeplink, когда прямой hosting не настроен.
     :returns: Настроенный диспетчер.
     """
     dp = Dispatcher()
 
-    welcome_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚔️ Открыть игру",
-                    web_app=WebAppInfo(url=miniapp_url),
-                )
-            ]
-        ]
-    )
+    if miniapp_url:
+        button = InlineKeyboardButton(
+            text="⚔️ Открыть игру",
+            web_app=WebAppInfo(url=miniapp_url),
+        )
+    else:
+        button = InlineKeyboardButton(
+            text="⚔️ Открыть игру",
+            url=fallback_url,
+        )
+    welcome_kb = InlineKeyboardMarkup(inline_keyboard=[[button]])
 
     @dp.message(CommandStart(deep_link=True))
     async def start_with_param(message: Message, command: CommandObject) -> None:
@@ -196,17 +201,27 @@ async def main() -> None:
         log.error("telegram_bot_token_not_set")
         sys.exit(1)
 
-    miniapp_url = (
-        f"https://t.me/{settings.telegram_bot_username}/app"
+    miniapp_url = settings.telegram_miniapp_url.strip()
+    if miniapp_url and not miniapp_url.startswith("https://"):
+        log.error("telegram_miniapp_url_must_be_https", url=miniapp_url)
+        sys.exit(1)
+    fallback_url = (
+        f"https://t.me/{settings.telegram_bot_username}/{settings.telegram_miniapp_short_name}"
         if settings.telegram_bot_username
         else "https://t.me/"
     )
+    if not miniapp_url:
+        log.warning(
+            "telegram_miniapp_url_not_set_using_fallback",
+            fallback=fallback_url,
+            hint="Set TELEGRAM_MINIAPP_URL in .env (cloudflared/ngrok URL in dev)",
+        )
 
     bot = Bot(
         token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = _build_dispatcher(miniapp_url=miniapp_url)
+    dp = _build_dispatcher(miniapp_url=miniapp_url, fallback_url=fallback_url)
     log.info("bot_starting", username=settings.telegram_bot_username)
     try:
         await dp.start_polling(bot, handle_signals=True)

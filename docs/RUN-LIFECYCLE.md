@@ -119,6 +119,9 @@
   - INSERT dungeon_runs (status=IN_PROGRESS, current_floor=0,
                          seed=random_bytes(32), character_state=snapshot,
                          expires_at=now()+24h)
+  -- Замечание: после INSERT'а seed и dungeon_id иммутабельны, защищены
+  -- триггером trg_run_seed_immutable (см. DATABASE.md §8.2). Любая попытка
+  -- UPDATE seed или dungeon_id со стороны кода — RAISE EXCEPTION.
   - сгенерировать ws_token (JWT, exp=30s):
     {
       run_id, user_id, character_snapshot (HP/mana/stats/skills),

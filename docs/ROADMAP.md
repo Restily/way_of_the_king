@@ -40,50 +40,52 @@
 - Покупка ассет-паков на itch.io ($50–100): dungeon tilesets (Crypt, Forest, Castle), character spritesheets (LPC Knight), monster pack, UI kit фэнтези
 - Game-icons.net — все иконки скиллов/предметов (CC BY 3.0, бесплатно)
 
-## Phase 1. Скелет (Недели 1–2)
+## Phase 1. Скелет (Недели 1–2) ✅ DONE *(production deploy отложен)*
 
-### Backend
+### Backend ✅
 
-- Init monorepo (`backend/` Python + `realtime/` Node + `frontend/` TS + `shared/`)
-- `pyproject.toml` (uv), Docker Compose (postgres + redis + caddy)
-- FastAPI app: `/health`, structured logging, sentry
-- SQLAlchemy 2.0 async + Alembic; первая миграция: users, characters, balances, wallets, transactions
-- `initData` HMAC валидация + JWT issue
-- POST `/auth/login`, GET `/me`, POST `/characters`
-- Caddy с auto-TLS, деплой на Hetzner
-- GitHub Actions: lint (ruff), test (pytest), build, deploy на push в main
+- ✅ Monorepo (`backend/` Python + `realtime/` Node + `frontend/` TS + `shared/`)
+- ✅ `pyproject.toml` (uv), Docker Compose (postgres + redis + caddy)
+- ✅ FastAPI app: `/health` + `/health/ready`, structlog (JSON в prod), Sentry с PII-редакцией + request_id tag
+- ✅ SQLAlchemy 2.0 async + Alembic 6 миграций (profile/balance/referral/hero/transaction + best-practices delta + idempotency)
+- ✅ `initData` HMAC валидация + JWT issue/verify (HS256/384/512 only)
+- ✅ POST `/auth/login`, GET `/me`, POST `/heroes` с idempotency middleware
+- ✅ Arq worker с cron-задачами (cleanup_expired_idempotency_keys)
+- ❌ **Деплой на Hetzner — отложен** (требует prod-инфраструктуры; W2-001..014)
 
-### Frontend
+### Frontend ✅
 
-- Vite + React 19 + TS + i18next (ru, en)
-- Telegram WebApp SDK интеграция
-- Авторизация по `initData` → JWT в memory + Telegram CloudStorage
-- Welcome screen, character creation (Knight only)
-- City UI placeholder (главное меню: Campaign / Inventory / Wallet / Settings)
+- ✅ Vite + React 19 + TS + i18next (ru, en)
+- ✅ Telegram WebApp SDK интеграция
+- ✅ Авторизация по `initData` → JWT в memory + Telegram CloudStorage
+- ✅ Welcome screen, character creation (Knight only)
+- ✅ City UI с активной кнопкой Campaign → Playground
+- ✅ Pixi v8 placeholder сцена: процедурные комнаты + circle Knight + nipplejs джойстик + WASD + collision + camera follow + room selector
 
-### Bot
+### Bot ✅
 
-- aiogram skeleton: `/start` с deeplink в Mini App
+- ✅ aiogram skeleton: `/start` с deeplink + referral parsing, `/help`, `/wallet` placeholder
 
-**Конец Phase 1:** в Telegram открывается Mini App, юзер логинится, создаёт Knight, видит City экран.
+**Конец Phase 1:** Mini App работает локально (через ngrok для тестирования в TG). Production-деплой ждёт W3+.
 
 ## Phase 2. Рендер и движение (Недели 3–4)
 
-### Frontend (PixiJS)
+### Frontend (PixiJS) — частично сделано в W2 с placeholder-графикой
 
-- Pixi v8 канвас рядом с React UI
-- `@pixi/tilemap`, рендер первой комнаты из Tiled JSON
-- Спрайт Knight (idle + walk × 4 направления) — из LPC pack
-- nipplejs виртуальный джойстик
-- Local-only движение с коллизиями (без сервера)
-- Camera follow player
+- ✅ Pixi v8 канвас + Application
+- ❌ `@pixi/tilemap`, рендер первой комнаты из Tiled JSON (нет assets)
+- ❌ Спрайт Knight (idle + walk × 4 направления) — из LPC pack (нет assets)
+- ✅ nipplejs виртуальный джойстик
+- ✅ Local-only движение с коллизиями (без сервера) — на placeholder-circle
+- ✅ Camera follow player
+- ✅ Resize handling (orientation change)
 
-### Tiled
+### Tiled — отложено
 
-- Создать 5 тестовых комнат разного размера/layout
-- Tile layer + collision layer (объекты)
+- 5 тестовых комнат уже сделано **процедурно** (см. `frontend/src/game/room.ts`)
+- Tiled JSON loader + LPC tileset — когда появятся assets
 
-**Конец Phase 2:** клиент-only, перс ходит по комнате, чувствуется feel mobile-Diablo
+**Конец Phase 2:** клиент-only, перс ходит по комнате, чувствуется feel mobile-Diablo. Placeholder-версия уже работает; остаётся swap geometry → Tiled и circle → animated sprite.
 
 ## Phase 3. Realtime layer (Недели 5–7)
 

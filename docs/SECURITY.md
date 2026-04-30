@@ -1,6 +1,6 @@
 # Security Policy
 
-Версия: 0.1
+Версия: 0.2
 Последнее обновление: 2026-04-27
 
 Документ описывает threat model, принципы secure development, операционные процедуры и accepted risks для Way Of The King.
@@ -51,10 +51,36 @@
 
 ### Custodial wallet
 - HD-wallet (BIP-39/44), один master mnemonic
+- **Derivation path не хранится в БД** — выводится детерминированно из `profile_id` (`m/44'/607'/<profile_id>'`). Снижает blast radius при компрометации БД: атакующий не получает прямую карту address ↔ HD slot. См. DATABASE.md §7.1.
 - Hot wallet ≤ 20% резерва, остальное — cold (multi-sig 2-of-3 на v1+)
 - Reconciliation cron каждые 5 мин (DB sum vs onchain) → расхождение > 1% = пауза
 - Лимиты: max 50 WOTK/день/юзер, 24h cooldown на смену внешнего адреса
 - Пороги для KYC при выводе > N USDT (когда регулятор применим)
+
+### 2FA codes — HMAC + pepper, не bcrypt
+6-значный код имеет 10⁶ entropy — любой password-hash (bcrypt/argon2/scrypt) перебирается за минуты на GPU. Поэтому:
+
+- Хранится `HMAC-SHA256(pepper, code)` в `withdrawals.tfa_code_hash` (BYTEA, 32 байта).
+- `pepper` — server-side секрет в env (`TFA_PEPPER`, минимум 32 байта random), **никогда не в БД**. Без pepper'а hash бесполезен.
+- TTL кода — 10 минут (`tfa_expires_at`).
+- Max 3 attempts (`tfa_attempts`), потом transition в `FAILED`.
+
+```python
+import hmac, hashlib
+def hash_2fa_code(code: str, pepper: bytes) -> bytes:
+    return hmac.new(pepper, code.encode(), hashlib.sha256).digest()
+
+def verify_2fa_code(code: str, stored_hash: bytes, pepper: bytes) -> bool:
+    return hmac.compare_digest(stored_hash, hash_2fa_code(code, pepper))
+```
+
+### Append-only ledger-таблицы (defence-in-depth)
+Финансовые данные защищены **двумя** механизмами на уровне БД:
+
+1. **БД-триггеры** (`BEFORE UPDATE/DELETE → RAISE EXCEPTION`) — основная защита. См. DATABASE.md §5.2, §7.4, §11.1.
+2. **`REVOKE UPDATE, DELETE`** на app-роли (`wotk_app`) — defence-in-depth.
+
+Покрытые таблицы: `transaction`, `treasury_log`, `audit_events`. Если один механизм пропустит (баг в Postgres, ошибочный GRANT) — второй сработает. Изменения в этих таблицах требуют DBA-доступа.
 
 ### Network / Infrastructure
 - HTTPS only (HSTS + preload в Caddyfile)
@@ -228,11 +254,12 @@ Acknowledgement: упоминание в Hall of Fame (если хочешь).
 - [ ] JWT issue/verify (Phase 1, W1-021)
 
 ### Phase 7 (TON integration)
-- [ ] HD wallet generator
+- [ ] HD wallet generator (derivation path computed from profile_id, not stored)
 - [ ] Cold/hot split с reconciliation
-- [ ] Withdrawal 2FA через бот
+- [ ] Withdrawal 2FA через бот (HMAC-SHA256 + pepper, BYTEA hash)
 - [ ] Outbox pattern для TON-операций
-- [ ] Treasury log + аудит cron
+- [ ] Treasury log + аудит cron + append-only triggers
+- [ ] `TFA_PEPPER` в env / Docker secret, ротация при компрометации
 
 ### Pre-launch (Phase 8)
 - [ ] External security review (фрилансер ~500$)

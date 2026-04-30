@@ -10,9 +10,8 @@
 * При выводе на UI/логи — конвертировать в строку через ``name``,
   не сырую цифру.
 
-**Скоуп MVP (§1-§5):** только :class:`HeroClass` и :class:`TransactionType`.
-Остальные enum'ы (``item.rarity``, ``dungeon.theme``, …) добавляются
-в соответствующих фазах.
+**Скоуп текущей фазы:** §1-§5 + §6 (items/affixes). §8 (dungeons) добавится
+в W3-011, §7 (wallets/withdrawals) — Phase 7.
 """
 
 from __future__ import annotations
@@ -47,6 +46,95 @@ class HeroClass(IntEnum):
     KNIGHT = 0
     ARCHER = 1
     NECROMANCER = 2
+
+
+class EquipmentSlot(IntEnum):
+    """Слот экипировки (``item.equipped_slot`` и ``item_base.slot`` в БД).
+
+    Маппинг из DATABASE.md §1.5. ``OFFHAND`` (3) валиден только если у hero'я
+    в ``WEAPON`` (2) НЕ ``is_two_handed=true`` — это валидируется в
+    application-слое equip-эндпоинта (Phase 5/W4).
+    """
+
+    HELMET = 0
+    CHEST = 1
+    WEAPON = 2
+    OFFHAND = 3
+    BOOTS = 4
+    RING = 5
+
+
+class Rarity(IntEnum):
+    """Редкость предмета (``item.rarity`` в БД).
+
+    Влияет на ``AFFIX_COUNT_DISTRIBUTION`` в :mod:`wotk.game.loot` —
+    rarity → распределение количества аффиксов.
+    """
+
+    COMMON = 0
+    MAGIC = 1
+    RARE = 2
+    EPIC = 3
+    LEGENDARY = 4
+
+
+class AffixType(IntEnum):
+    """Тип аффикса (``affix_definition.affix_type`` в БД).
+
+    Зеркало :class:`wotk.game.loot.AffixType` — обязательно держать
+    значения синхронными (тест в test_enums.py проверяет).
+    """
+
+    PREFIX = 0
+    SUFFIX = 1
+    IMPLICIT = 2
+
+
+class DungeonTheme(IntEnum):
+    """Тема данжа (``dungeons.theme`` в БД, §1.5).
+
+    Влияет на tile/sprite paks (когда появятся assets) и loot-pool flavour.
+    """
+
+    CRYPT = 0
+    FOREST = 1
+    CASTLE = 2
+    TOWER = 3
+    SWAMP = 4
+
+
+class Difficulty(IntEnum):
+    """Сложность данжа (``dungeons.difficulty`` в БД, §1.5).
+
+    Multiplier применяется к mob HP/damage/loot quality (формулы в SPEC.md).
+    """
+
+    NORMAL = 0
+    HARD = 1
+    MYTHIC = 2
+
+
+class RunStatus(IntEnum):
+    """Жизненный цикл прохождения данжа (``dungeon_runs.status`` в БД, §1.5).
+
+    State-machine (см. RUN-LIFECYCLE.md):
+    IN_PROGRESS → {COMPLETED|FAILED|FLED|ABANDONED} → SETTLED
+    """
+
+    IN_PROGRESS = 0
+    COMPLETED = 1
+    FAILED = 2
+    FLED = 3
+    ABANDONED = 4
+    SETTLED = 5
+
+
+class EncounterResult(IntEnum):
+    """Результат отдельного encounter'а в ране (``run_encounters.result``)."""
+
+    WIN = 0
+    LOSS = 1
+    FLED = 2
 
 
 class TransactionType(IntEnum):

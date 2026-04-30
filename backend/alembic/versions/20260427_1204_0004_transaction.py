@@ -31,7 +31,7 @@ def upgrade() -> None:
                 amount          BIGINT NOT NULL,
                 balance_after   BIGINT NOT NULL,
                 ref             JSONB,
-                idempotency_key TEXT,
+                idempotency_key UUID,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                 CONSTRAINT fk_transaction_profile FOREIGN KEY (profile_id)
                     REFERENCES profile(id),

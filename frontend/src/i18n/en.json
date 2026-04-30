@@ -16,13 +16,116 @@
     "title": "Castle",
     "hero_summary": "Level {{level}} · {{gold}} gold",
     "campaign": "Campaign",
+    "campaign_hint": "Story mode",
+    "playground": "Test Dungeon",
+    "playground_hint": "Test room",
     "inventory": "Inventory",
+    "inventory_hint": "Gear & bag",
     "wallet": "Wallet",
     "settings": "Settings",
+    "stats": "Stats",
     "coming_soon": "Coming soon"
+  },
+  "playground": {
+    "exit": "← Exit",
+    "hint": "WASD / arrows / joystick",
+    "room_label": "Room selector",
+    "menu_title": "Pick a run",
+    "online": "Real dungeons",
+    "offline": "Test rooms (offline)",
+    "offline_hint": "Client-only",
+    "no_dungeons": "No dungeons available (need a hero?)",
+    "entry_cost": "Cost: {{gold}} gold · {{energy}} energy",
+    "flee": "← Flee"
+  },
+  "inventory": {
+    "title": "Inventory",
+    "back": "← Back",
+    "equipped": "Equipped",
+    "bag": "Bag",
+    "tap_again_equip": "Tap again to equip",
+    "tap_again_unequip": "Tap again to unequip",
+    "slot": {
+      "helmet": "Helmet",
+      "chest": "Chest",
+      "weapon": "Weapon",
+      "offhand": "Offhand",
+      "boots": "Boots",
+      "ring": "Ring"
+    },
+    "menu": {
+      "equip": "Equip",
+      "unequip": "Unequip",
+      "compare": "Compare",
+      "cancel": "Cancel"
+    },
+    "compare": {
+      "close": "Close",
+      "no_affixes": "No affixes",
+      "slot_empty": "Slot empty"
+    }
   },
   "energy": {
     "label": "Energy {{current}}/{{cap}}"
+  },
+  "combat": {
+    "skill": {
+      "cleave": { "name": "Cleave", "hint": "Cone AoE" },
+      "shield_bash": { "name": "Shield Bash", "hint": "Stuns the target" },
+      "whirlwind": { "name": "Whirlwind", "hint": "Spin AoE" },
+      "charge": { "name": "Charge", "hint": "Dash + damage" }
+    },
+    "mob": {
+      "skeleton_warrior": "Skeleton Warrior",
+      "skeleton_archer": "Skeleton Archer",
+      "zombie": "Zombie"
+    },
+    "death": {
+      "title": "Defeated",
+      "hint": "Run rewards can be claimed back in the City.",
+      "return": "Return to City"
+    }
+  },
+  "act": {
+    "1": { "name": "Act I: The Crypt" },
+    "2": { "name": "Act II: The Forest" },
+    "3": { "name": "Act III: The Castle" }
+  },
+  "location": {
+    "1": {
+      "1": { "name": "Normal" },
+      "2": { "name": "Hard" }
+    },
+    "2": {
+      "1": { "name": "Normal" },
+      "2": { "name": "Hard" }
+    },
+    "3": {
+      "1": { "name": "Normal" },
+      "2": { "name": "Mythic" }
+    }
+  },
+  "campaign": {
+    "locked": "Locked",
+    "completed": "Completed",
+    "mastered": "Mastered",
+    "first_clear": "First clear!"
+  },
+  "run_summary": {
+    "title": "Run Summary",
+    "gold": "Gold",
+    "xp": "XP",
+    "duration": "Duration",
+    "boss_killed": "Boss Slain!",
+    "continue": "Continue → City",
+    "empty_loot": "No loot earned"
+  },
+  "floor_cleared": {
+    "toast": "Floor {{floor}} / {{total}}"
+  },
+  "level_up": {
+    "title": "Level Up!",
+    "subtitle": "Level {{level}}"
   },
   "errors": {
     "generic": "Something went wrong",

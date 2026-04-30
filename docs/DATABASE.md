@@ -1,6 +1,6 @@
 # Way Of The King — Схема базы данных
 
-Версия: 0.1
+Версия: 0.2
 Последнее обновление: 2026-04-27
 СУБД: PostgreSQL 16
 
@@ -27,7 +27,7 @@
 
 ### 1.2 Типы
 
-- **Деньги/количества** — `BIGINT` (gold = "копейки", 1 UI gold = 1000 в БД)
+- **Деньги/количества** — `BIGINT`. Gold целочисленный 1:1 — то же значение в БД и в UI. Никаких "копеек" / sub-units.
 - **Большие коллекции/JSON** — `JSONB` (с GIN индексом если нужен поиск)
 - **Время** — `TIMESTAMPTZ` всегда (никогда `TIMESTAMP`)
 - **Текст переменной длины** — `TEXT` (не `VARCHAR(N)`, длина проверяется на app-уровне)
@@ -295,11 +295,21 @@ ALTER TABLE profile
 **Индексы:**
 ```sql
 CREATE INDEX ix_profile_telegram_id ON profile(telegram_id);
-CREATE INDEX ix_profile_last_seen_at ON profile(last_seen_at) WHERE NOT is_blocked;
 CREATE INDEX ix_profile_admin ON profile(id) WHERE is_admin;
+-- HOT-обновлений по last_seen_at много (login каждый запрос), но запросы DAU
+-- агрегируются раз в сутки cron'ом → seq scan вполне приемлем.
+-- Индекс по last_seen_at специально НЕ ставим: write amplification на каждом
+-- логине превысит выгоду от редкого аналитического запроса.
 ```
 
-**Триггеры:** `updated_at` (см. раздел 12).
+**Storage tuning:**
+```sql
+-- profile — hot-updated (login обновляет last_seen_at, ip_country, telegram_username).
+-- Снижаем fillfactor → больше места для HOT updates → меньше bloat'а.
+ALTER TABLE profile SET (fillfactor = 90);
+```
+
+**Триггеры:** `updated_at` (см. раздел 12) + `trg_profile_block_audit` (см. §12.2).
 
 **Заметки:**
 - `telegram_language_code` намеренно не хранится — читается из `initData` при login и засетит `locale` на первый вход. Дальше `locale` независим.
@@ -307,6 +317,7 @@ CREATE INDEX ix_profile_admin ON profile(id) WHERE is_admin;
 - `referrer_profile_id` хранится только в `referral` (см. §3.2) — никакой денормализации в `profile`.
 - 2FA-счётчики (`failed_2fa_count`, `last_2fa_attempt_at`) живут в Redis с естественным TTL — нет нужды в отдельной таблице.
 - KYC поля **отсутствуют в MVP** — при подходе к регуляторному порогу выводов добавятся обратно.
+- **История блокировок** хранится в `audit_events` (event_type=USER_BLOCKED/USER_UNBLOCKED, payload содержит `reason` и `actor_admin_id`). Отдельную таблицу `profile_moderation` заводим только если потребуется быстрый запрос «вся история банов конкретного юзера» (тогда добавим в v1).
 
 ### 3.2 `referral`
 
@@ -326,7 +337,9 @@ CREATE INDEX ix_profile_admin ON profile(id) WHERE is_admin;
 ALTER TABLE referral
   ADD CONSTRAINT uq_referral_referred UNIQUE (referred_profile_id),
   ADD CONSTRAINT fk_referral_referrer FOREIGN KEY (referrer_profile_id) REFERENCES profile(id),
-  ADD CONSTRAINT fk_referral_referred FOREIGN KEY (referred_profile_id) REFERENCES profile(id);
+  ADD CONSTRAINT fk_referral_referred FOREIGN KEY (referred_profile_id) REFERENCES profile(id),
+  -- Защита от self-referral: профиль не может пригласить сам себя.
+  ADD CONSTRAINT ck_referral_no_self CHECK (referrer_profile_id != referred_profile_id);
 
 CREATE INDEX ix_referral_referrer_active ON referral(referrer_profile_id, expires_at)
   WHERE confirmed_at IS NOT NULL;
@@ -386,7 +399,7 @@ CREATE INDEX ix_hero_level ON hero(level) WHERE deleted_at IS NULL;
 | Колонка | Тип | NULL | Default | Описание |
 |---|---|---|---|---|
 | `profile_id` | BIGINT | NOT NULL | — | PK + FK |
-| `gold` | BIGINT | NOT NULL | `0` | "Копейки" (1 UI gold = 1000) |
+| `gold` | BIGINT | NOT NULL | `0` | Целое количество gold (1:1 с UI, без sub-units) |
 | `energy` | INT | NOT NULL | `100` | 0..energy_cap |
 | `energy_cap` | INT | NOT NULL | `100` | Может расти от пассивок |
 | `energy_updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | Для lazy регенерации |
@@ -400,7 +413,26 @@ ALTER TABLE balance
 
 **Триггеры:** `updated_at` + проверка инвариантов через CHECK.
 
-**Регенерация энергии** — не триггером, а функцией `regen_energy_for_profile(uid)`, вызываемой при чтении баланса в API (lazy regen). См. раздел 13.
+**Concurrency:** все мутации `balance.gold` (и сопутствующая запись в `transaction`)
+выполняются под пессимистичной блокировкой строки:
+
+```sql
+BEGIN;
+SELECT gold FROM balance WHERE profile_id = $1 FOR UPDATE;
+-- ...валидация amount...
+UPDATE balance SET gold = gold + $2 WHERE profile_id = $1;
+INSERT INTO transaction (profile_id, type, amount, balance_after, ...) VALUES (...);
+COMMIT;
+```
+
+Без `FOR UPDATE` две параллельных транзакции могут пройти CHECK и потом
+обе списать → перерасход. Альтернатива (advisory locks по `profile_id`)
+рассматривается при ~5k DAU, если row-level станет узким местом.
+
+**Регенерация энергии** — две функции, разделённые по семантике:
+
+* `current_energy(uid)` — **read-only**, не пишет в БД, используется на «чтение баланса» (`/me`, инвентарь). Возвращает то значение, которое **было бы** после регена. См. §13.4.
+* `regen_energy_for_profile(uid)` — **write**, материализует регенерацию в БД. Вызывается строго перед spend-операцией (вход в данж, оживление). См. §13.1.
 
 **Принципы экономики:**
 - **Только GOLD в `balance`** для MVP. WOTK не хранится здесь — учёт on-chain движений в `deposits` / `withdrawals`.
@@ -422,7 +454,7 @@ ALTER TABLE balance
 | `amount` | BIGINT | NOT NULL | — | Изменение gold. Может быть отрицательным. |
 | `balance_after` | BIGINT | NOT NULL | — | `balance.gold` после операции (defensive accounting, для reconciliation) |
 | `ref` | JSONB | NULL | — | `{run_id,item_id,tx_hash,withdrawal_id,...}` |
-| `idempotency_key` | TEXT | NULL | — | UUID, может быть NULL для системных |
+| `idempotency_key` | UUID | NULL | — | UUID v4 от клиента (header `Idempotency-Key`), NULL для системных |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 
 ```sql
@@ -434,6 +466,33 @@ ALTER TABLE transaction
 **Заметки:**
 - Колонка `currency` отсутствует — `transaction` хранит только GOLD. WOTK accounting — в `deposits` / `withdrawals` через `tx_hash`. Если в v1 потребуется отдельный ledger для SHARDS/KORONA — добавим обратно или сделаем отдельные таблицы.
 - `balance_after` = defensive copy: позволяет reconciliation cron'у быстро находить расхождения (`balance.gold` vs `last transaction.balance_after`).
+
+**Append-only гарантия:** `transaction` — финансовый ledger, мутации
+запрещены БД-уровнем (триггер + REVOKE), не приложением:
+
+```sql
+-- Generic-функция переиспользуется на treasury_log/audit_events.
+-- TG_TABLE_NAME даёт корректный error message в каждом случае.
+CREATE OR REPLACE FUNCTION trg_append_only_guard()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only (no UPDATE/DELETE allowed)', TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_transaction_block_update
+  BEFORE UPDATE ON transaction
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+CREATE TRIGGER trg_transaction_block_delete
+  BEFORE DELETE ON transaction
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+
+-- Дополнительно — REVOKE на app-роли (см. §18):
+REVOKE UPDATE, DELETE ON transaction FROM wotk_app;
+```
+
+Это критично для аудита и reconciliation: ни баг в коде, ни компрометация
+app-роли не должны давать возможность переписать историю движений gold.
 
 **Индексы:**
 ```sql
@@ -454,22 +513,26 @@ CREATE INDEX ix_transaction_ref_run ON transaction((ref->>'run_id')) WHERE ref ?
 
 | Колонка | Тип | NULL | Default | Описание |
 |---|---|---|---|---|
-| `id` | TEXT | NOT NULL | — | PK, slug-стиль: `sword_2h_iron` |
+| `id` | BIGSERIAL | — | — | PK (int для быстрых JOIN'ов с `item.base_id`) |
+| `kind` | TEXT | NOT NULL | — | Natural stable key: `sword_2h_iron`, `bow_long_oak`. UNIQUE. Используется как i18n-якорь (`t("item." + kind + ".name")`) и в loot-tables (config'ах данжей). |
 | `slot` | SMALLINT | NOT NULL | — | См. §1.5 (0=HELMET, ..., 5=RING) |
-| `kind` | TEXT | NOT NULL | — | sword_1h, axe_2h, bow, etc. (открытая таксономия → text) |
-| `name_key` | TEXT | NOT NULL | — | i18n ключ |
-| `min_ilvl` | INT | NOT NULL | `1` | С какого уровня может выпасть |
-| `max_ilvl` | INT | NOT NULL | `60` | До какого |
+| `min_ilvl` | INT | NOT NULL | `1` | С какого уровня может выпасть. Верхней границы нет — low-tier base'ы остаются в pool на любом ilvl (PoE-style). |
 | `base_stats` | JSONB | NOT NULL | — | `{"min_dmg":10,"max_dmg":15,"as":1.0}` |
-| `allowed_classes` | JSONB | NOT NULL | `'[0,1,2]'` | Массив class.value (см. §1.5 hero.class) |
 | `is_two_handed` | BOOLEAN | NOT NULL | `false` | Только для weapon |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 
+**Заметки:**
+- `name_key` отсутствует — выводится из `kind`: `t("item." + kind + ".name")`. Один источник истины.
+- `max_ilvl` отсутствует — гейтинг pool'а только через `min_ilvl`. Low-tier base'ы остаются в endgame-poolе (PoE 3.0+ behavior).
+- `allowed_classes` отсутствует — в MVP любой class носит любой предмет. Если в v1+ понадобится class restriction (например staff только для necromancer) — добавим обратно.
+
 ```sql
 ALTER TABLE item_base
-  ADD CONSTRAINT pk_item_base PRIMARY KEY (id);
+  ADD CONSTRAINT pk_item_base PRIMARY KEY (id),
+  ADD CONSTRAINT uq_item_base_kind UNIQUE (kind),
+  ADD CONSTRAINT ck_item_base_slot CHECK (slot BETWEEN 0 AND 5);
 
-CREATE INDEX ix_item_base_slot_kind ON item_base(slot, kind);
+CREATE INDEX ix_item_base_slot ON item_base(slot);
 ```
 
 ### 6.2 `affix_definition` (reference)
@@ -478,10 +541,9 @@ CREATE INDEX ix_item_base_slot_kind ON item_base(slot, kind);
 
 | Колонка | Тип | NULL | Default | Описание |
 |---|---|---|---|---|
-| `id` | TEXT | NOT NULL | — | PK, slug: `prefix_str_t1` |
+| `id` | BIGSERIAL | — | — | PK (int для быстрых JOIN'ов с `item.affixes` JSONB) |
 | `affix_type` | SMALLINT | NOT NULL | — | См. §1.5 (0=PREFIX, 1=SUFFIX, 2=IMPLICIT) |
-| `name_key` | TEXT | NOT NULL | — | i18n ключ |
-| `mod_group` | TEXT | NOT NULL | — | Группа взаимной исключаемости. Все tiers одного аффикса делят группу: `prefix_str_t1`/`prefix_str_t2` → `mod_group="str_flat"`. См. PoE-style mutual exclusion. |
+| `mod_group` | TEXT | NOT NULL | — | Группа взаимной исключаемости. Все tiers одного аффикса делят группу: например, ``life_flat_t1`` и ``life_flat_t2`` → ``mod_group="life_flat"``. См. PoE-style mutual exclusion. |
 | `min_ilvl` | INT | NOT NULL | `1` | На каком ilvl может появиться |
 | `tier` | INT | NOT NULL | `1` | Display-only (T1 низкий → T10 высокий). НЕ алгоритмический gate — gating через `min_ilvl`. |
 | `weight` | INT | NOT NULL | `100` | Базовый вес для weighted random |
@@ -493,9 +555,14 @@ CREATE INDEX ix_item_base_slot_kind ON item_base(slot, kind);
 | `value_max` | INT | NOT NULL | — | Верхняя граница uniform-роллa |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 
+**Заметки:**
+- `name_key` отсутствует — выводится из `mod_type` + `tier`: `t("affix." + mod_type + ".t" + tier)`. Один источник истины.
+- (mod_group, mod_type, tier) логически уникален — стоит UNIQUE для защиты от дублей при seed'инге.
+
 ```sql
 ALTER TABLE affix_definition
   ADD CONSTRAINT pk_affix_definition PRIMARY KEY (id),
+  ADD CONSTRAINT uq_affix_def_natural UNIQUE (mod_group, mod_type, tier),
   ADD CONSTRAINT ck_affix_type CHECK (affix_type BETWEEN 0 AND 2),
   ADD CONSTRAINT ck_affix_value_range CHECK (value_min <= value_max),
   ADD CONSTRAINT ck_affix_tier CHECK (tier BETWEEN 1 AND 10),
@@ -525,10 +592,10 @@ TDD, 27 тестов). См. `LOOT-DESIGN.md` для дизайн-нот (TODO).
 |---|---|---|---|---|
 | `id` | BIGSERIAL | — | — | PK |
 | `owner_profile_id` | BIGINT | NOT NULL | — | Текущий владелец |
-| `base_id` | TEXT | NOT NULL | — | FK item_base.id |
+| `base_id` | BIGINT | NOT NULL | — | FK `item_base.id` (int для быстрых JOIN'ов) |
 | `rarity` | SMALLINT | NOT NULL | — | См. §1.5 (0=COMMON, ..., 4=LEGENDARY) |
 | `ilvl` | INT | NOT NULL | — | Уровень при дропе |
-| `affixes` | JSONB | NOT NULL | `'[]'` | `[{"id":"prefix_str_t2","value":15}]` |
+| `affixes` | JSONB | NOT NULL | `'[]'` | `[{"id":42,"value":15,"t":3,"vmin":10,"vmax":20,"mod_type":"flat_str"}]` — snapshot на момент дропа (см. §6.3.1) |
 | `equipped_on` | BIGINT | NULL | — | hero_id если надет |
 | `equipped_slot` | SMALLINT | NULL | — | См. §1.5 (0=HELMET..5=RING). Только если equipped_on. |
 | `inventory_position` | INT | NULL | — | 0..47 если в bag (NULL если equipped или в любом эскроу) |
@@ -544,16 +611,6 @@ ALTER TABLE item
   ADD CONSTRAINT fk_item_base FOREIGN KEY (base_id) REFERENCES item_base(id),
   ADD CONSTRAINT fk_item_hero FOREIGN KEY (equipped_on) REFERENCES hero(id),
   ADD CONSTRAINT fk_item_escrow_run FOREIGN KEY (escrow_run_id) REFERENCES dungeon_runs(id),
-  ADD CONSTRAINT ck_item_rarity CHECK (rarity BETWEEN 0 AND 4),
-  ADD CONSTRAINT ck_item_position CHECK (inventory_position IS NULL OR inventory_position BETWEEN 0 AND 47),
-  ADD CONSTRAINT ck_item_equipped_slot CHECK (equipped_slot IS NULL OR equipped_slot BETWEEN 0 AND 5),
-  -- Предмет в одном из 4 состояний: на персонаже / в инвентаре / в маркет-эскроу / в run-эскроу
-  ADD CONSTRAINT ck_item_state CHECK (
-    (equipped_on IS NOT NULL AND equipped_slot IS NOT NULL AND inventory_position IS NULL AND NOT is_in_market_escrow AND escrow_run_id IS NULL) OR
-    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NOT NULL AND NOT is_in_market_escrow AND escrow_run_id IS NULL) OR
-    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NULL AND is_in_market_escrow AND escrow_run_id IS NULL) OR
-    (equipped_on IS NULL AND equipped_slot IS NULL AND inventory_position IS NULL AND NOT is_in_market_escrow AND escrow_run_id IS NOT NULL)
-  );
 
 -- Один предмет на слот персонажа
 CREATE UNIQUE INDEX uq_item_equipment_slot ON item(equipped_on, equipped_slot)
@@ -586,6 +643,40 @@ CREATE INDEX ix_item_escrow_run ON item(escrow_run_id) WHERE escrow_run_id IS NO
 CREATE INDEX ix_item_affixes_gin ON item USING gin(affixes jsonb_path_ops);
 ```
 
+#### 6.3.1 Snapshot аффиксов в JSONB
+
+`item.affixes` хранит **полный снимок** значений на момент дропа:
+
+```json
+[
+  {"id": 42, "value": 15, "t": 3, "vmin": 10, "vmax": 20}
+]
+```
+
+| Ключ | Источник | Зачем |
+|---|---|---|
+| `id` | `affix_definition.id` | FK для UI tooltip ("Какой mod?") |
+| `value` | rolled value | актуальный бонус |
+| `t` | `affix_definition.tier` на момент дропа | UI tier-цвет (T1..T10) |
+| `vmin` | `affix_definition.value_min` | "Roll quality" — для UI gauge |
+| `vmax` | `affix_definition.value_max` | "Roll quality" |
+
+**Почему snapshot, а не lookup**:
+1. **Балансные правки `affix_definition` не должны менять старые предметы.** Если в патче снизили `value_max` для `flat_str` с 30 до 20, существующие предметы с value=25 остаются легитимными. Это PoE/D2-практика.
+2. **Маркетный поиск без JOIN'а.** GIN на JSONB закрывает фильтры «найти предмет с T1+ life и vquality > 80%».
+3. **Стоимость storage пренебрежимо мала** — 4 коротких ключа на аффикс vs JOIN на 10M item × ~50ns на lookup = на порядок дешевле в hot path.
+
+**Для рыночных фильтров** (если потребуется фильтр «strength >= X» в v1):
+добавить **денормализованные total-колонки** (`total_str INT`, `total_dex INT`, ...)
+с обновлением через trigger или application-side. GIN по JSONB решает 80% кейсов,
+B-tree по INT — оставшиеся 20% (range queries).
+
+**Item lifecycle audit:** для дебага «откуда у юзера такой предмет» —
+события (`DROPPED`, `EQUIPPED`, `LISTED`, `SOLD`, `SALVAGED`, `EXPIRED_RUN`)
+пишутся в `audit_events` с `event_type=ITEM_LIFECYCLE` (добавить в §1.5
+при реализации §6) и `payload={item_id, action, ...}`. Отдельная таблица
+`item_event` — оверкилл для MVP; `audit_events` уже партиционирована.
+
 ---
 
 ## 7. Таблицы — Wallet & TON
@@ -596,7 +687,6 @@ CREATE INDEX ix_item_affixes_gin ON item USING gin(affixes jsonb_path_ops);
 |---|---|---|---|---|
 | `profile_id` | BIGINT | NOT NULL | — | PK + FK |
 | `internal_ton_address` | TEXT | NOT NULL | — | Сгенерированный sub-address для депозитов |
-| `internal_derivation_path` | TEXT | NOT NULL | — | BIP-44 path: `m/44'/607'/<profile_id>'` |
 | `external_ton_address` | TEXT | NULL | — | Куда юзер выводит |
 | `external_address_set_at` | TIMESTAMPTZ | NULL | — | Кулдаун на смену (24h) |
 | `external_address_verified_at` | TIMESTAMPTZ | NULL | — | TonConnect proof received |
@@ -613,6 +703,10 @@ ALTER TABLE wallets
 
 CREATE INDEX ix_wallets_internal_address ON wallets(internal_ton_address);
 ```
+
+**Заметки:**
+- `internal_derivation_path` намеренно НЕ хранится в БД. Путь детерминирован: `m/44'/607'/<profile_id>'` — выводится из `profile_id` в коде. Хранение увеличивало бы blast radius при компрометации БД (атакующий получает прямую карту address ↔ derivation slot).
+- Sanity-check адреса: при старте процесса recompute address по seed для случайного профиля и сравнить с `internal_ton_address`. Расхождение = аларм (см. SECURITY.md).
 
 ### 7.2 `deposits`
 
@@ -662,13 +756,13 @@ CREATE INDEX ix_deposits_to_address ON deposits(to_address);
 | `amount_wotk` | BIGINT | NOT NULL | — | Сколько WOTK к отправке |
 | `exchange_rate` | NUMERIC(20, 8) | NOT NULL | — | На момент создания |
 | `status` | SMALLINT | NOT NULL | `0` | См. §1.5 withdrawals.status (0=PENDING..6=REFUNDED) |
-| `tfa_code_hash` | TEXT | NULL | — | bcrypt от 6-значного кода |
+| `tfa_code_hash` | BYTEA | NULL | — | HMAC-SHA256(pepper, code) — см. SECURITY.md. **Не bcrypt:** 6-значный код имеет 10⁶ space, любой password-hash легко перебирается; HMAC + server-side pepper делает hash бесполезным без секрета. |
 | `tfa_attempts` | INT | NOT NULL | `0` | |
 | `tfa_expires_at` | TIMESTAMPTZ | NULL | — | TTL ~10 мин |
 | `tx_hash` | TEXT | NULL | — | Onchain после SENT |
 | `failure_reason` | TEXT | NULL | — | |
 | `retry_count` | INT | NOT NULL | `0` | Для idempotent ретраев |
-| `idempotency_key` | TEXT | NULL | — | UUID от клиента |
+| `idempotency_key` | UUID | NULL | — | UUID v4 от клиента |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
 | `confirmed_at` | TIMESTAMPTZ | NULL | — | |
@@ -685,6 +779,34 @@ CREATE INDEX ix_withdrawals_profile_created ON withdrawals(profile_id, created_a
 -- Очередь обработки: PENDING (0) или PROCESSING (2)
 CREATE INDEX ix_withdrawals_pending ON withdrawals(created_at) WHERE status IN (0, 2);
 CREATE INDEX ix_withdrawals_status ON withdrawals(status, updated_at);
+```
+
+**State-machine guard (terminal-state lock):** withdrawal проходит граф
+PENDING → AWAITING_2FA → PROCESSING → SENT → CONFIRMED, плюс ветви FAILED/REFUNDED.
+Триггер запрещает «оживление» из терминального состояния (CONFIRMED/REFUNDED) —
+без него баг в payout-воркере мог бы повторно отправить TX:
+
+```sql
+CREATE OR REPLACE FUNCTION trg_withdrawal_state_guard()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Терминальные статусы (CONFIRMED=4, FAILED=5, REFUNDED=6) — иммутабельны
+  IF OLD.status IN (4, 5, 6) THEN
+    RAISE EXCEPTION 'withdrawal % is terminal (status=%) — cannot mutate',
+      OLD.id, OLD.status;
+  END IF;
+  -- Запрет «отката» по статусу (status можно только увеличивать или → FAILED/REFUNDED)
+  IF NEW.status < OLD.status AND NEW.status NOT IN (5, 6) THEN
+    RAISE EXCEPTION 'withdrawal % status regression % → %',
+      OLD.id, OLD.status, NEW.status;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_withdrawal_state_guard
+  BEFORE UPDATE ON withdrawals
+  FOR EACH ROW EXECUTE FUNCTION trg_withdrawal_state_guard();
 ```
 
 ### 7.4 `treasury_log`
@@ -716,6 +838,20 @@ CREATE INDEX ix_treasury_log_created ON treasury_log(created_at DESC);
 CREATE INDEX ix_treasury_log_action ON treasury_log(action, created_at DESC);
 ```
 
+**Append-only:** `treasury_log` — финансовый аудит казны, мутации запрещены
+БД-уровнем (тот же паттерн что у `transaction`, см. §5.2):
+
+```sql
+CREATE TRIGGER trg_treasury_block_update
+  BEFORE UPDATE ON treasury_log
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+CREATE TRIGGER trg_treasury_block_delete
+  BEFORE DELETE ON treasury_log
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+
+REVOKE UPDATE, DELETE ON treasury_log FROM wotk_app;
+```
+
 ---
 
 ## 8. Таблицы — Dungeons & Combat
@@ -729,7 +865,7 @@ CREATE INDEX ix_treasury_log_action ON treasury_log(action, created_at DESC);
 | `theme` | SMALLINT | NOT NULL | — | См. §1.5 (0=CRYPT..4=SWAMP) |
 | `difficulty` | SMALLINT | NOT NULL | — | См. §1.5 (0=NORMAL, 1=HARD, 2=MYTHIC) |
 | `min_level` | INT | NOT NULL | `1` | |
-| `entry_cost_gold` | BIGINT | NOT NULL | — | В "копейках" |
+| `entry_cost_gold` | BIGINT | NOT NULL | — | Целое количество gold |
 | `entry_cost_energy` | INT | NOT NULL | `10` | |
 | `daily_limit` | INT | NOT NULL | `5` | Входов в сутки |
 | `floors_count` | INT | NOT NULL | `5` | Включая босса |
@@ -792,6 +928,28 @@ CREATE INDEX ix_runs_status_expires ON dungeon_runs(status, expires_at)
 CREATE INDEX ix_runs_dungeon_status ON dungeon_runs(dungeon_id, status);
 ```
 
+**Seed-immutability trigger:** `seed` фиксируется при INSERT и не должен
+меняться никогда — это контракт reproducible RNG для replay/anti-cheat:
+
+```sql
+CREATE OR REPLACE FUNCTION trg_run_seed_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.seed IS DISTINCT FROM OLD.seed THEN
+    RAISE EXCEPTION 'dungeon_runs.seed is immutable (run_id=%)', OLD.id;
+  END IF;
+  IF NEW.dungeon_id IS DISTINCT FROM OLD.dungeon_id THEN
+    RAISE EXCEPTION 'dungeon_runs.dungeon_id is immutable (run_id=%)', OLD.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_runs_seed_immutable
+  BEFORE UPDATE ON dungeon_runs
+  FOR EACH ROW EXECUTE FUNCTION trg_run_seed_immutable();
+```
+
 **Партиционирование:** по месяцу `started_at` после MVP (когда таблица перевалит 10M+ строк).
 
 ### 8.3 `run_encounters`
@@ -805,7 +963,7 @@ CREATE INDEX ix_runs_dungeon_status ON dungeon_runs(dungeon_id, status);
 | `floor` | INT | NOT NULL | — | |
 | `encounter_idx` | INT | NOT NULL | — | Внутри этажа |
 | `enemies_spawned` | JSONB | NOT NULL | — | Snapshot мобов |
-| `combat_summary` | JSONB | NOT NULL | — | `{damage_dealt,damage_taken,duration_s,deaths}` |
+| `combat_summary` | JSONB | NOT NULL | — | `{"v":1,"damage_dealt":...,"damage_taken":...,"duration_s":...,"deaths":...}`. Ключ `v` — версия схемы summary, обязательный. При смене формата увеличиваем `v` и поддерживаем парсер для всех версий (replay старых ранов не должен сломаться). |
 | `loot_rolled` | JSONB | NOT NULL | `'[]'` | Что упало |
 | `gold_rolled` | BIGINT | NOT NULL | `0` | |
 | `result` | SMALLINT | NOT NULL | — | См. §1.5 (0=WIN, 1=LOSS, 2=FLED) |
@@ -998,7 +1156,9 @@ CREATE INDEX ix_pvp_season_played ON pvp_matches(season_id, played_at DESC);
 | `season_id` | INT | NOT NULL | — | |
 | `profile_id` | BIGINT | NOT NULL | — | |
 | `hero_id` | BIGINT | NOT NULL | — | |
-| `elo` | INT | NOT NULL | `1000` | Текущий рейтинг |
+| `elo` | REAL | NOT NULL | `1500.0` | Текущий рейтинг (Glicko-2 рабочая шкала: 1500 ± 350) |
+| `rating_deviation` | REAL | NOT NULL | `350.0` | Glicko-2 RD — сужается с количеством матчей |
+| `volatility` | REAL | NOT NULL | `0.06` | Glicko-2 σ — измеряет «случайность» результатов |
 | `wins` | INT | NOT NULL | `0` | |
 | `losses` | INT | NOT NULL | `0` | |
 | `draws` | INT | NOT NULL | `0` | |
@@ -1017,6 +1177,13 @@ ALTER TABLE pvp_player_stats
 -- Leaderboard query
 CREATE INDEX ix_pvp_stats_leaderboard ON pvp_player_stats(season_id, elo DESC);
 ```
+
+**Почему Glicko-2, а не классический ELO:** ELO некорректен для систем, где
+игроки появляются с разной частотой (ладдеры с эпизодической активностью).
+Glicko-2 учитывает «уверенность» в рейтинге через RD: новичок 1500 ± 350
+проигрывает топу 2000 ± 50 → его RD сужается медленно, рейтинг топа почти
+не меняется. Реализация сама — в коде; БД-уровень просто хранит три float'а.
+Стоимость: +8 байт vs INT-поле, выигрыш — корректное матчмейкинг и rating decay.
 
 ---
 
@@ -1050,7 +1217,20 @@ CREATE INDEX ix_audit_type_created ON audit_events(event_type, created_at DESC);
 CREATE INDEX ix_audit_severity ON audit_events(severity, created_at DESC) WHERE severity >= 2;
 ```
 
-**Партиционирование:** по месяцу.
+**Append-only + REVOKE:**
+```sql
+CREATE TRIGGER trg_audit_block_update
+  BEFORE UPDATE ON audit_events
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+CREATE TRIGGER trg_audit_block_delete
+  BEFORE DELETE ON audit_events
+  FOR EACH ROW EXECUTE FUNCTION trg_append_only_guard();
+
+REVOKE UPDATE, DELETE ON audit_events FROM wotk_app;
+-- DELETE через DETACH старых партиций — выполняется DBA-ролью.
+```
+
+**Партиционирование:** RANGE по месяцу `created_at`, **с первого дня** (не откладываем). Audit-таблица растёт быстро (~10x от `transaction` за счёт login-событий) и чистится через `DETACH PARTITION` старых месяцев → archive в S3. Без партиций vacuum/index maintenance быстро деградирует.
 
 ### 11.2 `idempotency_keys`
 
@@ -1058,23 +1238,33 @@ CREATE INDEX ix_audit_severity ON audit_events(severity, created_at DESC) WHERE 
 
 | Колонка | Тип | NULL | Default | Описание |
 |---|---|---|---|---|
-| `key` | TEXT | NOT NULL | — | PK, обычно UUID от клиента |
-| `profile_id` | BIGINT | NOT NULL | — | Чтобы не было коллизий между юзерами |
+| `key` | UUID | NOT NULL | — | PK part 1, UUID v4 от клиента (header `Idempotency-Key`) |
+| `profile_id` | BIGINT | NOT NULL | — | PK part 2, защита от коллизий между юзерами |
 | `endpoint` | TEXT | NOT NULL | — | `/api/v1/inventory/equip` |
-| `request_hash` | TEXT | NOT NULL | — | SHA-256 от тела запроса (защита от reuse с другим payload) |
+| `request_hash` | BYTEA | NOT NULL | — | SHA-256(body), 32 байта. **BYTEA, не TEXT(64)** — вдвое меньше места + быстрее `=`-сравнение. |
 | `response_status` | INT | NOT NULL | — | HTTP status |
-| `response_body` | JSONB | NULL | — | Закэшированный ответ |
+| `response_body` | JSONB | NULL | — | Закэшированный ответ. Размер ограничен CHECK'ом (см. ниже). |
+| `is_payment_critical` | BOOLEAN | NOT NULL | `false` | true для transaction/withdrawal — даёт longer TTL |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `now()` | |
-| `expires_at` | TIMESTAMPTZ | NOT NULL | — | now() + 24h |
+| `expires_at` | TIMESTAMPTZ | NOT NULL | — | `now() + (2h non-payment | 24h payment)` |
 
 ```sql
 ALTER TABLE idempotency_keys
   ADD CONSTRAINT pk_idem PRIMARY KEY (key, profile_id),
-  ADD CONSTRAINT fk_idem_profile FOREIGN KEY (profile_id) REFERENCES profile(id) ON DELETE CASCADE;
+  ADD CONSTRAINT fk_idem_profile FOREIGN KEY (profile_id) REFERENCES profile(id) ON DELETE CASCADE,
+  -- защита от раздувания: response не должен превращать таблицу в логохранилище
+  ADD CONSTRAINT ck_idem_body_size CHECK (
+    response_body IS NULL OR pg_column_size(response_body) <= 65536
+  ),
+  ADD CONSTRAINT ck_idem_request_hash_len CHECK (octet_length(request_hash) = 32);
 
 CREATE INDEX ix_idem_expires ON idempotency_keys(expires_at);
 -- Cleanup-cron убирает expired
 ```
+
+**TTL-стратегия:**
+- **Non-payment** (equip, hero create, etc.) — 2h. Покрывает retry-окно клиента + flaky network, без раздувания таблицы.
+- **Payment-critical** (`/transaction`, `/withdrawal`) — 24h. Защита от двойной оплаты при долгом offline-окне.
 
 ### 11.3 `daily_quests` (v1)
 
@@ -1104,6 +1294,15 @@ ALTER TABLE daily_quests
 CREATE INDEX ix_dq_profile_date ON daily_quests(profile_id, date_utc);
 CREATE INDEX ix_dq_active ON daily_quests(profile_id) WHERE NOT is_claimed;
 ```
+
+**Партиционирование:** RANGE по `date_utc` помесячно. На 50k DAU × 3 квеста/день
+→ ~4.5M строк/месяц. DETACH старых партиций → таблица не раздувается.
+
+**Lazy daily reset:** генерация на день не batch-job'ом для всех юзеров (миллионы
+INSERT'ов в полночь = пик нагрузки), а **lazy при первом обращении** в новый
+день: API на чтение квестов проверяет, есть ли запись на `current_date_utc()`,
+если нет — генерирует и INSERT'ит. Под `INSERT ... ON CONFLICT DO NOTHING`
+безопасно от race condition.
 
 ---
 
@@ -1289,6 +1488,41 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
+### 13.4 `current_energy(uid BIGINT) RETURNS INT`
+
+**Read-only** версия `regen_energy_for_profile`: вычисляет «реальное» значение
+энергии без записи в БД. Используется на горячих read-путях (`/me`, инвентарь),
+где запись на каждое чтение = write amplification и блокировка.
+
+```sql
+CREATE OR REPLACE FUNCTION current_energy(uid BIGINT)
+RETURNS INT AS $$
+DECLARE
+  e INT;
+  cap INT;
+  last_update TIMESTAMPTZ;
+  elapsed_minutes INT;
+  regen_amount INT;
+BEGIN
+  SELECT energy, energy_cap, energy_updated_at
+    INTO e, cap, last_update
+  FROM balance WHERE profile_id = uid;
+
+  IF e >= cap THEN
+    RETURN e;
+  END IF;
+
+  elapsed_minutes := EXTRACT(EPOCH FROM (now() - last_update)) / 60;
+  regen_amount := elapsed_minutes / 6;  -- 1 ед / 6 мин (синхронно с §13.1)
+
+  RETURN LEAST(e + regen_amount, cap);
+END;
+$$ LANGUAGE plpgsql STABLE;
+```
+
+`STABLE` маркер позволяет Postgres'у кешировать результат внутри одной
+SQL-операции (несколько вызовов в одном SELECT не делают повторных reads).
+
 ---
 
 ## 14. Партиционирование
@@ -1299,11 +1533,13 @@ $$ LANGUAGE plpgsql;
 
 | Таблица | Когда | Стратегия |
 |---|---|---|
-| `transaction` | С первого дня | RANGE на `created_at`, по месяцу |
-| `audit_events` | С первого дня | RANGE на `created_at`, по месяцу |
+| `transaction` | Отложено до ~10M строк или ~50k DAU | RANGE на `created_at`, по месяцу. В MVP — обычная таблица. |
+| `audit_events` | **С первого дня** (миграция при создании таблицы) | RANGE на `created_at`, по месяцу |
+| `daily_quests` | **С первого дня** | RANGE на `date_utc`, по месяцу |
 | `run_encounters` | С v1 (когда таблица > 5M) | RANGE на `created_at`, по месяцу |
 | `dungeon_runs` | С v1 (когда > 10M) | RANGE на `started_at`, по месяцу |
 | `pvp_matches` | С v1.1 | RANGE на `played_at`, по месяцу |
+| `item` | Отложено (~50M предметов) | HASH на `owner_profile_id` (равномерное распределение, локальные индексы) |
 | `deposits`, `withdrawals` | НЕ партиционируем | Объёмы малы, доступ по profile_id |
 
 ### 14.2 Пример для `transaction`
@@ -1363,45 +1599,48 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY mv_leaderboard_level;
 
 ## 16. Очерёдность миграций для MVP
 
-**Migration 0001** — Базовые таблицы:
-- profile, balance, wallets
-- Триггер `trg_set_updated_at` для всех
+**Migration 0001** — `profile` + `balance` (✅ применена)
 
-**Migration 0002** — Reference data:
-- item_base, affix_definition
-- Seeds через separate Python скрипт `scripts/seed_reference.py`
+**Migration 0002** — `referral` (✅ применена)
 
-**Migration 0003** — Game state:
-- hero, item
-- Триггер profile_block_audit
+**Migration 0003** — `hero` (✅ применена)
 
-**Migration 0004** — Economy:
-- transaction (с партиционированием с первого дня)
-- idempotency_keys
+**Migration 0004** — `transaction` (✅ применена, без партиционирования)
 
-**Migration 0005** — Dungeons:
-- dungeons, dungeon_runs, run_encounters, daily_dungeon_entries, campaign_progress
-- Триггер run_activity
+**Migration 0005** — Best-practices delta для §3-§5 (этот документ v0.2):
+- DROP `ix_profile_last_seen_at` (write amplification)
+- `ALTER TABLE profile SET (fillfactor = 90)`
+- `ck_referral_no_self` CHECK
+- Append-only триггеры на `transaction` + REVOKE
+- Функции `current_energy(uid)` (read-only) + `regen_energy_for_profile(uid)` (write)
 
-**Migration 0006** — TON wallet:
-- deposits, withdrawals, treasury_log
-- Триггер wallet_totals_grow
+**Migration 0006** — Reference data:
+- `item_base`, `affix_definition`
+- Seeds через `scripts/seed_reference.py`
 
-**Migration 0007** — Audit & ops:
-- audit_events (с партиционированием)
-- referral
+**Migration 0007** — `item` (с snapshot affixes JSONB) + lifecycle audit hooks
 
-**Migration 0008** — Functions:
-- regen_energy_for_profile
-- cleanup_expired_runs
-- cleanup_expired_idempotency_keys
+**Migration 0008** — Idempotency:
+- `idempotency_keys` (UUID key, BYTEA request_hash, size CHECK)
 
-**v1 миграции (после MVP):**
+**Migration 0009** — Dungeons:
+- `dungeons`, `dungeon_runs`, `run_encounters`, `daily_dungeon_entries`, `campaign_progress`
+- Триггеры `trg_run_activity`, `trg_run_seed_immutable`
 
-- 0010 — market_listings, market_sales
-- 0011 — daily_quests
-- 0012 — pvp_seasons, pvp_matches, pvp_player_stats
-- 0020 — friends, achievements (если нужны)
+**Migration 0010** — TON wallet:
+- `wallets` (без `internal_derivation_path`)
+- `deposits`, `withdrawals` (BYTEA tfa_code_hash, state-machine guard, UUID idempotency_key)
+- `treasury_log` (append-only триггеры)
+
+**Migration 0011** — Audit & ops:
+- `audit_events` **с партиционированием по месяцу** + REVOKE
+- Cron на rolling-партиции (создаём на 3 мес вперёд)
+
+**v1 миграции:**
+- 0020 — `market_listings`, `market_sales`
+- 0021 — `daily_quests` (партиционирована по месяцу)
+- 0030 — `pvp_seasons`, `pvp_matches`, `pvp_player_stats` (Glicko-2)
+- 0040 — `friends`, `achievements` (если нужны)
 
 ---
 
@@ -1437,6 +1676,12 @@ GRANT CONNECT ON DATABASE wotk TO wotk_app;
 GRANT USAGE ON SCHEMA public TO wotk_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO wotk_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO wotk_app;
+
+-- Append-only ledger-таблицы — REVOKE мутаций даже у app-роли (defence-in-depth).
+-- Триггеры (см. §5.2, §7.4, §11.1) — first line; REVOKE — second line.
+REVOKE UPDATE, DELETE ON transaction    FROM wotk_app;
+REVOKE UPDATE, DELETE ON treasury_log   FROM wotk_app;
+REVOKE UPDATE, DELETE ON audit_events   FROM wotk_app;
 
 -- Роль read-only для аналитики
 CREATE ROLE wotk_analytics LOGIN PASSWORD '...';

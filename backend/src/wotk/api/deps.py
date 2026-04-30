@@ -1,5 +1,8 @@
 """FastAPI-зависимости: :func:`current_profile`, :func:`current_admin`,
 helpers.
+
+Shared helpers (используются в нескольких endpoint-модулях):
+* :func:`find_first_free_inventory_slot` — поиск свободной ячейки в сумке.
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from typing import Annotated
 import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotk.core.db import get_session
@@ -18,13 +22,48 @@ from wotk.core.jwt_auth import (
     JwtService,
     get_jwt_service,
 )
-from wotk.domain.models import Profile
+from wotk.domain.models import Hero, Profile
+
+#: MVP размер сумки — 6×8 = 48 ячеек (inclusive max position = 47).
+_INVENTORY_CAP = 48
 
 log = structlog.get_logger()
 
 # ``auto_error=False`` — отдаём свой JSON-формат ошибок
 # (Starlette default возвращает обычный 403/401 без полезного detail).
 _bearer = HTTPBearer(auto_error=False, scheme_name="JWT")
+
+
+async def find_first_free_inventory_slot(
+    session: AsyncSession, *, profile_id: int
+) -> int | None:
+    """Найти минимальный неиспользуемый ``inventory_position`` для profile.
+
+    SQL: ``generate_series(0, 47) EXCEPT used_positions``.
+
+    Promoted from ``api/v1/inventory.py`` в W5-031 чтобы позволить
+    :func:`wotk.api.v1.dungeons.internal_finalize_run` также использовать
+    функцию без cross-module import'а private helper'а.
+
+    :param session: Async DB session.
+    :param profile_id: PK профиля-владельца.
+    :returns: Целое 0..47 или ``None`` если все ячейки заняты.
+    """
+    row = await session.execute(
+        text(
+            """
+            SELECT pos FROM generate_series(0, :cap - 1) AS pos
+             WHERE pos NOT IN (
+                SELECT inventory_position FROM item
+                 WHERE owner_profile_id = :pid
+                   AND inventory_position IS NOT NULL
+             )
+             ORDER BY pos LIMIT 1
+            """
+        ),
+        {"cap": _INVENTORY_CAP, "pid": profile_id},
+    )
+    return row.scalar()
 
 
 def ensure_not_blocked(profile: Profile) -> None:
@@ -107,3 +146,19 @@ async def current_admin(
             status.HTTP_403_FORBIDDEN, detail="admin_required"
         )
     return profile
+
+
+async def load_active_hero(
+    session: AsyncSession, *, profile_id: int
+) -> Hero | None:
+    """Вернуть первого active hero профиля или ``None`` если героя нет.
+
+    Active = ``deleted_at IS NULL``. В MVP у профиля максимум один hero, но
+    запрос пишется как «первый по id» для будущей multi-class поддержки.
+    """
+    return await session.scalar(
+        select(Hero)
+        .where(Hero.profile_id == profile_id, Hero.deleted_at.is_(None))
+        .order_by(Hero.id.asc())
+        .limit(1)
+    )

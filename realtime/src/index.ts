@@ -4,38 +4,12 @@ import { monitor } from '@colyseus/monitor';
 import express from 'express';
 import basicAuth from 'express-basic-auth';
 import { createServer } from 'http';
-import pino from 'pino';
 
-// Безопасные дефолты: если env vars не выставлены — поведение как в production.
+import { log } from './logger.js';
+import { DungeonRoom } from './rooms/DungeonRoom.js';
+
 const APP_ENV = process.env.APP_ENV ?? 'production';
-const NODE_ENV = process.env.NODE_ENV ?? 'production';
 const PORT = Number(process.env.REALTIME_PORT ?? 2567);
-
-const log = pino({
-  transport: NODE_ENV === 'production'
-    ? undefined
-    : { target: 'pino-pretty' },
-  redact: {
-    // Никогда не логировать чувствительные поля.
-    paths: [
-      '*.token',
-      '*.jwt',
-      '*.password',
-      '*.secret',
-      '*.authorization',
-      '*.mnemonic',
-      '*.hot_wallet_mnemonic',
-      '*.api_key',
-      '*.ws_token',
-      '*.init_data',
-      '*.initData',
-      '*.tfa_code',
-      'req.headers.authorization',
-      'req.headers.cookie',
-    ],
-    censor: '***REDACTED***',
-  },
-});
 
 const app = express();
 
@@ -97,8 +71,17 @@ const gameServer = new Server({
   transport: new WebSocketTransport({ server: httpServer }),
 });
 
-// Регистрация игровых комнат — заполнится в Phase 3 (Недели 5-7).
-// gameServer.define('dungeon', DungeonRoom);
+// Регистрация игровых комнат.
+gameServer.define('dungeon', DungeonRoom);
+
+// JWT_SECRET sanity-check на старте (DungeonRoom.onAuth требует его).
+if (!process.env.JWT_SECRET) {
+  if (APP_ENV !== 'development') {
+    log.fatal('JWT_SECRET must be set in non-development env');
+    process.exit(1);
+  }
+  log.warn('JWT_SECRET not set — DungeonRoom.onAuth will reject all connections');
+}
 
 httpServer.listen(PORT, () => {
   log.info({ port: PORT, env: APP_ENV }, 'realtime server listening');

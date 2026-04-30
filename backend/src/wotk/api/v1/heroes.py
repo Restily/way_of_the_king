@@ -5,12 +5,14 @@ from __future__ import annotations
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotk.api.deps import current_profile
+from wotk.api.idempotency import CachedHttpResponse, begin_idempotent
 from wotk.core.db import get_session
 from wotk.domain.enums import HeroClass
 from wotk.domain.models import Hero, Profile
@@ -60,9 +62,10 @@ class HeroCreated(BaseModel):
     active_skills: list[str]
 
 
-@router.post("", response_model=HeroCreated, status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_hero(
     body: CreateHeroRequest,
+    request: Request,
     profile: Annotated[Profile, Depends(current_profile)],
     session: AsyncSession = Depends(get_session),
     idempotency_key: Annotated[
@@ -71,23 +74,37 @@ async def create_hero(
         # UUID = 36 chars, ULID = 26 — 128 c запасом.
         Header(alias="Idempotency-Key", max_length=128),
     ] = None,
-) -> HeroCreated:
+) -> JSONResponse:
     """В MVP создаётся только Knight, max 1 на профиль.
 
     Уникальность гарантируется partial unique index ``uq_hero_profile_class``.
     Race-condition обрабатывается ловлей ``IntegrityError`` (TOCTOU-safe).
 
+    Idempotency: при наличии ``Idempotency-Key`` header — повторный запрос с
+    тем же ключом и тем же body вернёт закэшированный ответ (TTL 2h). Запрос
+    с тем же ключом и ДРУГИМ body отвергается 422 — клиентская ошибка.
+
     :param body: :class:`CreateHeroRequest` с именем.
+    :param request: Starlette Request — нужен для idempotency body hash.
     :param profile: Авторизованный профиль (через :func:`current_profile`).
     :param session: Async DB session.
-    :param idempotency_key: ``Idempotency-Key`` header, опционален.
-        В W2 будет использоваться для request-deduplication через
-        ``transaction.idempotency_key``. Сейчас принимается для совместимости
-        с клиентом.
-    :returns: :class:`HeroCreated` с данными нового hero.
-    :raises HTTPException: 409 ``HERO_ALREADY_EXISTS`` если hero уже есть.
+    :param idempotency_key: ``Idempotency-Key`` header, опциональный UUID v4.
+    :returns: :class:`JSONResponse` со status 201 и :class:`HeroCreated` body.
+    :raises HTTPException: 409 ``HERO_ALREADY_EXISTS`` если hero уже есть,
+        400 при невалидном формате idempotency-key,
+        422 при несовпадении body для уже использованного key.
     """
-    _ = idempotency_key  # placeholder для будущей логики
+    idem = await begin_idempotent(
+        request=request,
+        session=session,
+        profile=profile,
+        raw_key=idempotency_key,
+    )
+    if idem.cached_response is not None:
+        return JSONResponse(
+            status_code=idem.cached_response.status_code,
+            content=idem.cached_response.content,
+        )
 
     hero = Hero(
         profile_id=profile.id,
@@ -104,10 +121,7 @@ async def create_hero(
             status.HTTP_409_CONFLICT, detail=ERROR_HERO_EXISTS
         ) from e
 
-    log.info(
-        "hero_created", profile_id=profile.id, hero_id=hero.id, name=hero.name
-    )
-    return HeroCreated(
+    response_body = HeroCreated(
         id=hero.id,
         hero_class=hero.hero_class,
         name=hero.name,
@@ -116,4 +130,14 @@ async def create_hero(
         unspent_points=hero.unspent_points,
         base_stats=hero.base_stats,
         active_skills=hero.active_skills,
+    ).model_dump(mode="json")
+
+    response = CachedHttpResponse(
+        status_code=status.HTTP_201_CREATED, content=response_body
     )
+    await idem.store(session, response=response)
+
+    log.info(
+        "hero_created", profile_id=profile.id, hero_id=hero.id, name=hero.name
+    )
+    return JSONResponse(status_code=response.status_code, content=response.content)

@@ -1,10 +1,12 @@
-"""HTTP middleware: request_id."""
+"""HTTP middleware: request_id (structlog + Sentry tag) + request duration log."""
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
+import sentry_sdk
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -19,16 +21,14 @@ _BOUND_KEYS = ("request_id", "method", "path")
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Присваивает каждому request уникальный ``request_id`` и биндит в structlog.
+    """Присваивает каждому request уникальный ``request_id`` и биндит в structlog + Sentry.
 
     Если клиент прислал свой ``X-Request-ID`` — используем его (для
     cross-service tracing). Иначе генерируем UUID4 hex (32 символа без дефисов).
 
-    После обработки возвращается в response header (для отладки на клиенте).
-
-    Устанавливается в FastAPI app::
-
-        app.add_middleware(RequestIdMiddleware)
+    Sentry-сторона: ``request_id`` ставится тэгом на изолированный scope
+    каждого запроса — error в Sentry содержит точный ID для корреляции с логами.
+    После обработки возвращается в response header.
     """
 
     async def dispatch(
@@ -36,12 +36,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        """Обработать request, биндя ``request_id`` в structlog context.
-
-        :param request: Starlette Request.
-        :param call_next: Следующий middleware/handler в chain.
-        :returns: Response с проставленным ``X-Request-ID``.
-        """
+        """Обработать request, биндя ``request_id`` в structlog + Sentry."""
         incoming = request.headers.get(REQUEST_ID_HEADER)
         request_id = incoming if incoming else uuid.uuid4().hex
         request.state.request_id = request_id
@@ -51,9 +46,34 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             method=request.method,
             path=request.url.path,
         )
-        try:
-            response = await call_next(request)
-        finally:
-            structlog.contextvars.unbind_contextvars(*_BOUND_KEYS)
+        log = structlog.get_logger()
+        started_at = time.perf_counter()
+        status_code = 500  # default — overwritten при success
+        with sentry_sdk.isolation_scope() as scope:
+            scope.set_tag("request_id", request_id)
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                return self._with_id(response, request_id)
+            except Exception:
+                log.exception(
+                    "request_failed",
+                    duration_ms=int((time.perf_counter() - started_at) * 1000),
+                    status_code=status_code,
+                )
+                raise
+            finally:
+                # health-эндпоинты дёргаются Caddy/Cloudflare часто —
+                # их успешные log-events заглушаем, иначе прод-лог захлебнётся.
+                if not request.url.path.startswith("/health"):
+                    log.info(
+                        "request_completed",
+                        duration_ms=int((time.perf_counter() - started_at) * 1000),
+                        status_code=status_code,
+                    )
+                structlog.contextvars.unbind_contextvars(*_BOUND_KEYS)
+
+    @staticmethod
+    def _with_id(response: Response, request_id: str) -> Response:
         response.headers[REQUEST_ID_HEADER] = request_id
         return response

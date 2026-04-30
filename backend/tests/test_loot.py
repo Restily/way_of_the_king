@@ -39,14 +39,24 @@ from wotk.game.loot import (
 # ============================================================================
 
 
+#: Стабильные id-константы для in-pool аффиксов (используются в assertions).
+LIFE_FLAT_T1 = 1
+LIFE_FLAT_T2 = 2
+STR_FLAT_T1 = 3
+ATK_PCT_T1 = 4
+CRIT_PCT_T1 = 5
+RESIST_FIRE_T1 = 6
+
+
 def _affix_pool() -> tuple[AffixDefinition, ...]:
-    """Маленький pool: по 2 tier на каждый из 5 mod_groups (3 префикса, 2 суффикса)."""
+    """Маленький pool: 6 аффиксов по 5 mod_groups (4 префикса, 2 суффикса)."""
     return (
-        # life_flat — prefix, для всех слотов
         AffixDefinition(
-            id="prefix_life_t1",
+            id=LIFE_FLAT_T1,
             affix_type=AffixType.PREFIX,
             mod_group="life_flat",
+            mod_type="flat_hp",
+            tier=1,
             applicable_slots=(0, 1, 2, 3, 4, 5),
             min_ilvl=1,
             weight=100,
@@ -54,53 +64,59 @@ def _affix_pool() -> tuple[AffixDefinition, ...]:
             value_max=20,
         ),
         AffixDefinition(
-            id="prefix_life_t2",
+            id=LIFE_FLAT_T2,
             affix_type=AffixType.PREFIX,
             mod_group="life_flat",
+            mod_type="flat_hp",
+            tier=2,
             applicable_slots=(0, 1, 2, 3, 4, 5),
             min_ilvl=20,
             weight=50,
             value_min=21,
             value_max=40,
         ),
-        # str_flat — prefix
         AffixDefinition(
-            id="prefix_str_t1",
+            id=STR_FLAT_T1,
             affix_type=AffixType.PREFIX,
             mod_group="str_flat",
+            mod_type="flat_str",
+            tier=1,
             applicable_slots=(0, 1, 2, 3, 4, 5),
             min_ilvl=1,
             weight=80,
             value_min=2,
             value_max=5,
         ),
-        # atk_pct — prefix, weapon-only
         AffixDefinition(
-            id="prefix_atk_t1",
+            id=ATK_PCT_T1,
             affix_type=AffixType.PREFIX,
             mod_group="atk_pct",
-            applicable_slots=(2,),  # weapon
+            mod_type="pct_atk",
+            tier=1,
+            applicable_slots=(2,),  # weapon-only
             min_ilvl=1,
             weight=120,
             value_min=10,
             value_max=25,
         ),
-        # crit_pct — suffix
         AffixDefinition(
-            id="suffix_crit_t1",
+            id=CRIT_PCT_T1,
             affix_type=AffixType.SUFFIX,
             mod_group="crit_pct",
+            mod_type="pct_crit",
+            tier=1,
             applicable_slots=(0, 1, 2, 3, 4, 5),
             min_ilvl=1,
             weight=60,
             value_min=3,
             value_max=8,
         ),
-        # resist_fire — suffix
         AffixDefinition(
-            id="suffix_resist_fire_t1",
+            id=RESIST_FIRE_T1,
             affix_type=AffixType.SUFFIX,
             mod_group="resist_fire",
+            mod_type="pct_resist_fire",
+            tier=1,
             applicable_slots=(0, 1, 3, 4, 5),  # без weapon
             min_ilvl=1,
             weight=80,
@@ -149,63 +165,41 @@ def test_sample_affix_count_distribution_statistical() -> None:
 # ============================================================================
 
 
+def _make_affix(**overrides: object) -> AffixDefinition:
+    """Удобный конструктор для weight-тестов."""
+    defaults: dict[str, object] = {
+        "id": 999,
+        "affix_type": AffixType.PREFIX,
+        "mod_group": "g",
+        "applicable_slots": (0,),
+        "min_ilvl": 1,
+        "weight": 100,
+        "value_min": 1,
+        "value_max": 10,
+        "mod_type": "test_mod",
+    }
+    defaults.update(overrides)
+    return AffixDefinition(**defaults)  # type: ignore[arg-type]
+
+
 def test_effective_weight_no_overrides_returns_base() -> None:
-    a = AffixDefinition(
-        id="x",
-        affix_type=AffixType.PREFIX,
-        mod_group="g",
-        applicable_slots=(0,),
-        min_ilvl=1,
-        weight=100,
-        value_min=1,
-        value_max=10,
-    )
+    a = _make_affix()
     assert effective_weight(a, ["sword", "weapon"]) == 100
 
 
 def test_effective_weight_uses_leftmost_tag_match() -> None:
-    a = AffixDefinition(
-        id="x",
-        affix_type=AffixType.PREFIX,
-        mod_group="g",
-        applicable_slots=(0,),
-        min_ilvl=1,
-        weight=100,
-        value_min=1,
-        value_max=10,
-        spawn_weights={"sword": 500, "weapon": 1},
-    )
+    a = _make_affix(spawn_weights={"sword": 500, "weapon": 1})
     # leftmost = "sword" → 500 (а не 1 от weapon)
     assert effective_weight(a, ["sword", "weapon"]) == 500
 
 
 def test_effective_weight_zero_means_excluded() -> None:
-    a = AffixDefinition(
-        id="x",
-        affix_type=AffixType.PREFIX,
-        mod_group="g",
-        applicable_slots=(0,),
-        min_ilvl=1,
-        weight=100,
-        value_min=1,
-        value_max=10,
-        spawn_weights={"bow": 0},
-    )
+    a = _make_affix(spawn_weights={"bow": 0})
     assert effective_weight(a, ["bow", "weapon"]) == 0
 
 
 def test_effective_weight_falls_back_when_no_tag_matches() -> None:
-    a = AffixDefinition(
-        id="x",
-        affix_type=AffixType.PREFIX,
-        mod_group="g",
-        applicable_slots=(0,),
-        min_ilvl=1,
-        weight=100,
-        value_min=1,
-        value_max=10,
-        spawn_weights={"unrelated_tag": 999},
-    )
+    a = _make_affix(spawn_weights={"unrelated_tag": 999})
     assert effective_weight(a, ["sword", "weapon"]) == 100
 
 
@@ -283,7 +277,7 @@ def test_mod_group_exclusion_no_duplicates() -> None:
 
 
 def test_ilvl_filtering_excludes_high_tier_below_threshold() -> None:
-    """На ilvl=10 prefix_life_t2 (min_ilvl=20) не должен появиться."""
+    """На ilvl=10 LIFE_FLAT_T2 (min_ilvl=20) не должен появиться."""
     pool = _affix_pool()
     appeared = set()
     for seed in range(200):
@@ -297,11 +291,11 @@ def test_ilvl_filtering_excludes_high_tier_below_threshold() -> None:
         )
         for a in affixes:
             appeared.add(a.affix_id)
-    assert "prefix_life_t2" not in appeared
+    assert LIFE_FLAT_T2 not in appeared
 
 
 def test_slot_filtering_weapon_only_affix_excluded_from_helmet() -> None:
-    """``prefix_atk_t1`` (weapon-only, slot=2) не должен попасть на helmet (slot=0)."""
+    """ATK_PCT_T1 (weapon-only, slot=2) не должен попасть на helmet (slot=0)."""
     pool = _affix_pool()
     appeared = set()
     for seed in range(200):
@@ -315,7 +309,7 @@ def test_slot_filtering_weapon_only_affix_excluded_from_helmet() -> None:
         )
         for a in affixes:
             appeared.add(a.affix_id)
-    assert "prefix_atk_t1" not in appeared
+    assert ATK_PCT_T1 not in appeared
 
 
 def test_value_within_range() -> None:
@@ -379,9 +373,10 @@ def test_empty_pool_returns_empty() -> None:
 
 def test_spawn_weight_override_zeroes_pool() -> None:
     """Если spawn_weights = 0 для тегов base'а — аффикс никогда не появится."""
+    forbidden_id = 9001
     pool = (
         AffixDefinition(
-            id="forbidden",
+            id=forbidden_id,
             affix_type=AffixType.PREFIX,
             mod_group="x",
             applicable_slots=(2,),
@@ -389,6 +384,7 @@ def test_spawn_weight_override_zeroes_pool() -> None:
             weight=99999,
             value_min=1,
             value_max=10,
+            mod_type="forbidden",
             spawn_weights={"sword": 0},
         ),
     )
@@ -404,7 +400,7 @@ def test_spawn_weight_override_zeroes_pool() -> None:
         )
         for a in affixes:
             appeared.add(a.affix_id)
-    assert "forbidden" not in appeared
+    assert forbidden_id not in appeared
 
 
 # ============================================================================
@@ -416,14 +412,14 @@ def test_generate_item_full_object() -> None:
     pool = _affix_pool()
     item = generate_item(
         random.Random(7),
-        base_id="sword_2h_iron",
+        base_id=42,
         slot=2,
         ilvl=30,
         rarity=Rarity.RARE,
         base_tags=["sword", "two_handed", "weapon"],
         affix_pool=pool,
     )
-    assert item.base_id == "sword_2h_iron"
+    assert item.base_id == 42
     assert item.slot == 2
     assert item.ilvl == 30
     assert item.rarity == Rarity.RARE
@@ -464,6 +460,6 @@ def test_quality_clamped() -> None:
 
 
 def _resolve(
-    pool: tuple[AffixDefinition, ...], affix_id: str
+    pool: tuple[AffixDefinition, ...], affix_id: int
 ) -> AffixDefinition:
     return next(a for a in pool if a.id == affix_id)

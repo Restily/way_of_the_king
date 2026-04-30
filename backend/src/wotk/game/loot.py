@@ -86,15 +86,18 @@ class AffixDefinition:
     Адаптер из SQLAlchemy-модели делается в Phase 5, тогда же
     добавляется repository.
 
-    :ivar id: Stable slug, например ``prefix_str_t1``.
+    :ivar id: PK ``affix_definition.id`` (int для быстрых JOIN'ов).
     :ivar affix_type: PREFIX / SUFFIX / IMPLICIT.
     :ivar mod_group: Группа для mutual exclusion. Все tiers одного аффикса
-        делят группу. Пример: все ``life_flat_t1..t5`` → ``mod_group="life_flat"``.
+        делят группу. Пример: все ``life_flat`` tier 1..5 имеют
+        ``mod_group="life_flat"``.
     :ivar applicable_slots: Кортеж slot.value (см. EquipmentSlot enum).
     :ivar min_ilvl: Минимальный item level для появления.
     :ivar weight: Базовый вес для weighted random.
     :ivar value_min: Нижняя граница uniform-roll'а.
     :ivar value_max: Верхняя граница uniform-roll'а.
+    :ivar mod_type: i18n-якорь (``flat_str``, ``pct_atk``, …).
+        Используется для перевода: ``t("affix." + mod_type + ".t" + tier)``.
     :ivar tags: Опциональные теги для tag-based weight override (PoE-style).
     :ivar spawn_weights: Опциональный override веса по тегам base'а.
         Если задан и тег base'а есть в ключах — используется этот вес
@@ -103,7 +106,7 @@ class AffixDefinition:
         Не алгоритмический gate.
     """
 
-    id: str
+    id: int
     affix_type: AffixType
     mod_group: str
     applicable_slots: tuple[int, ...]
@@ -111,6 +114,7 @@ class AffixDefinition:
     weight: int
     value_min: int
     value_max: int
+    mod_type: str
     tags: frozenset[str] = field(default_factory=frozenset)
     spawn_weights: dict[str, int] | None = None
     tier: int = 1
@@ -120,11 +124,13 @@ class AffixDefinition:
 class RolledAffix:
     """Результат роллинга аффикса для конкретного предмета.
 
-    :ivar affix_id: ``AffixDefinition.id``.
+    Сериализуется в ``item.affixes`` JSONB как ``{"id": int, "value": int}``.
+
+    :ivar affix_id: ``affix_definition.id`` (int).
     :ivar value: Целое из ``[value_min, value_max]``.
     """
 
-    affix_id: str
+    affix_id: int
     value: int
 
 
@@ -132,7 +138,7 @@ class RolledAffix:
 class GeneratedItem:
     """Финальный сгенерированный предмет (сериализуется в ``items.affixes`` JSONB).
 
-    :ivar base_id: ``ItemBase.id``.
+    :ivar base_id: ``item_base.id`` (int).
     :ivar slot: Целевой EquipmentSlot.value.
     :ivar ilvl: Уровень предмета (равен уровню моба-дроппера).
     :ivar rarity: Rarity enum.
@@ -140,7 +146,7 @@ class GeneratedItem:
         для отображения, не для геймплея).
     """
 
-    base_id: str
+    base_id: int
     slot: int
     ilvl: int
     rarity: Rarity
@@ -292,7 +298,7 @@ def generate_affixes(
 def generate_item(
     rng: random.Random,
     *,
-    base_id: str,
+    base_id: int,
     slot: int,
     ilvl: int,
     rarity: Rarity,

@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_bot_username: str = "WayOfTheKingDevBot"
     telegram_initdata_ttl_seconds: int = 86400
+    # Прямой HTTPS URL Mini App (cloudflared/ngrok в dev, prod-домен в prod).
+    # Telegram WebAppInfo НЕ принимает t.me-ссылки — нужен реальный hosting.
+    # В dev — URL trycloudflare/ngrok туннеля; в prod — публичный домен фронта.
+    telegram_miniapp_url: str = ""
+    # Short name Mini App из BotFather (для fallback URL-кнопки на t.me/<bot>/<short>).
+    telegram_miniapp_short_name: str = "play"
 
     # === JWT ===
     jwt_secret: SecretStr = SecretStr("")
@@ -133,6 +139,11 @@ class Settings(BaseSettings):
     # если realtime скомпрометирован, FastAPI→realtime канал всё ещё доверенный.
     internal_hmac_realtime_to_api: SecretStr = SecretStr("")
     internal_hmac_api_to_realtime: SecretStr = SecretStr("")
+
+    # === Realtime / Colyseus ===
+    # URL Colyseus-кластера для ws_token return в /dungeons/{id}/enter.
+    # В dev — локальный Colyseus; в prod — wss://realtime.<domain>.
+    realtime_ws_url: str = "ws://localhost:2567"
 
     # === TON ===
     ton_network: Literal["testnet", "mainnet"] = "testnet"

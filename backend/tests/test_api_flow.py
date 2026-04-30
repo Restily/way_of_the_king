@@ -2,61 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import uuid
 
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine
+from httpx import AsyncClient
 
-from wotk.api.main import app
-from wotk.core.config import get_settings
-from wotk.core.db import get_session
-
-from ._helpers import build_init_data
-
-BOT_TOKEN = "test:bot_token_for_e2e_tests_1234567890"
-
-
-@pytest_asyncio.fixture
-async def client(
-    test_engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,  # noqa: ARG001 — нужен для get_settings reset
-) -> AsyncIterator[AsyncClient]:
-    """HTTP-клиент с подменённой DB session на test_engine."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    test_factory = async_sessionmaker(
-        bind=test_engine, expire_on_commit=False, autoflush=False
-    )
-
-    async def override_get_session():
-        # Зеркалим production-семантику wotk.core.db._open_session:
-        # commit on success, rollback on exception.
-        async with test_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    app.dependency_overrides[get_session] = override_get_session
-
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", BOT_TOKEN)
-    get_settings.cache_clear()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
-
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()
+from ._helpers import E2E_BOT_TOKEN, build_init_data, login_e2e
 
 
 @pytest.mark.asyncio
 async def test_full_flow_login_create_hero_get_me(client: AsyncClient) -> None:
-    init_data = build_init_data(bot_token=BOT_TOKEN, telegram_id=11111)
+    init_data = build_init_data(bot_token=E2E_BOT_TOKEN, telegram_id=11111)
 
     r = await client.post("/api/v1/auth/login", json={"init_data": init_data})
     assert r.status_code == 200, r.text
@@ -78,7 +34,7 @@ async def test_full_flow_login_create_hero_get_me(client: AsyncClient) -> None:
     r = await client.post(
         "/api/v1/heroes",
         json={"name": "Galahad"},
-        headers={**auth_headers, "Idempotency-Key": "test-key-1"},
+        headers={**auth_headers, "Idempotency-Key": str(uuid.uuid4())},
     )
     assert r.status_code == 201, r.text
     hero = r.json()
@@ -92,7 +48,7 @@ async def test_full_flow_login_create_hero_get_me(client: AsyncClient) -> None:
     r = await client.post(
         "/api/v1/heroes",
         json={"name": "Mordred"},
-        headers={**auth_headers, "Idempotency-Key": "test-key-2"},
+        headers={**auth_headers, "Idempotency-Key": str(uuid.uuid4())},
     )
     assert r.status_code == 409
     assert r.json()["detail"] == "HERO_ALREADY_EXISTS"
@@ -131,10 +87,7 @@ async def test_me_with_invalid_token(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_create_hero_name_too_short(client: AsyncClient) -> None:
-    init_data = build_init_data(bot_token=BOT_TOKEN, telegram_id=22222)
-    r = await client.post("/api/v1/auth/login", json={"init_data": init_data})
-    access = r.json()["access_token"]
-
+    access = await login_e2e(client, telegram_id=22222)
     r = await client.post(
         "/api/v1/heroes",
         json={"name": "X"},

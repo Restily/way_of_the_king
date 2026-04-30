@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -196,13 +197,14 @@ async def test_transaction_with_enum(db_session: AsyncSession) -> None:
     db_session.add(profile)
     await db_session.flush()
 
+    tx_idem = uuid.uuid4()
     tx = Transaction(
         profile_id=profile.id,
         type=TransactionType.DUNGEON_ENTRY,
         amount=-100,
         balance_after=900,
         ref={"run_id": "abc-123"},
-        idempotency_key="test-idem-1",
+        idempotency_key=tx_idem,
     )
     db_session.add(tx)
     await db_session.flush()
@@ -220,13 +222,14 @@ async def test_transaction_idempotency_unique(db_session: AsyncSession) -> None:
     db_session.add(profile)
     await db_session.flush()
 
+    dup = uuid.uuid4()
     db_session.add(
         Transaction(
             profile_id=profile.id,
             type=TransactionType.DUNGEON_REWARD,
             amount=50,
             balance_after=50,
-            idempotency_key="dup-key",
+            idempotency_key=dup,
         )
     )
     await db_session.flush()
@@ -237,7 +240,7 @@ async def test_transaction_idempotency_unique(db_session: AsyncSession) -> None:
             type=TransactionType.DUNGEON_REWARD,
             amount=50,
             balance_after=100,
-            idempotency_key="dup-key",
+            idempotency_key=dup,
         )
     )
     with pytest.raises(IntegrityError):

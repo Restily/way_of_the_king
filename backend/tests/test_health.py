@@ -28,6 +28,26 @@ async def test_health_does_not_leak_version() -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_ready_returns_alembic_version(client: AsyncClient) -> None:
+    """/health/ready должен подтверждать миграции и postgres ping.
+
+    Использует ``client`` fixture — там test_engine с применёнными миграциями,
+    значит alembic_version должен быть != null.
+    """
+    r = await client.get("/health/ready")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "ready"
+    assert data["checks"]["postgres"] == "ok"
+    # Не пинимся к конкретной ревизии — иначе assert ломается на каждой миграции.
+    assert data["checks"]["migrations"]
+    assert data["checks"]["migrations"] != "no alembic_version row"
+    # Redis + Arq (W3-052) — Redis должен быть поднят в test compose.
+    assert data["checks"]["redis"] == "ok"
+    assert isinstance(data["checks"]["arq_queue"], int)
+
+
+@pytest.mark.asyncio
 async def test_cors_does_not_allow_wildcard() -> None:
     """CORS никогда не должен возвращать allow-origin: * — даже в dev."""
     transport = ASGITransport(app=app)

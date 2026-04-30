@@ -293,7 +293,7 @@
 - HMAC-валидация `initData` на каждом запросе (TTL 24h)
 - JWT для сессий (короткоживущие 1h, refresh)
 - Rate limit: 60 RPS на IP, 30 RPS на юзера
-- Все суммы в БД bigint (gold = "копейки")
+- Все суммы в БД bigint (целочисленный gold, без sub-units)
 - Все балансовые операции — в DB транзакциях
 - `idempotency_key` на каждый POST с фронта
 - Hot wallet seed только в env vars + бумажная backup
@@ -432,7 +432,7 @@ items (
 
 balances (
   user_id bigint PK FK,
-  gold bigint DEFAULT 0,         -- в "копейках" (1 gold = 1000)
+  gold bigint DEFAULT 0,         -- целочисленный gold (1:1 с UI)
   energy int DEFAULT 100,
   energy_updated_at timestamptz,
   shards bigint DEFAULT 0,

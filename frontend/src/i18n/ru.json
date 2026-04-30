@@ -16,13 +16,116 @@
     "title": "Замок",
     "hero_summary": "Уровень {{level}} · {{gold}} золота",
     "campaign": "Кампания",
+    "campaign_hint": "История мира",
+    "playground": "Тестовый данж",
+    "playground_hint": "Тестовая комната",
     "inventory": "Инвентарь",
+    "inventory_hint": "Снаряжение и сумка",
     "wallet": "Кошелёк",
     "settings": "Настройки",
+    "stats": "Характеристики",
     "coming_soon": "Скоро"
+  },
+  "playground": {
+    "exit": "← Выйти",
+    "hint": "WASD / стрелки / джойстик",
+    "room_label": "Выбор комнаты",
+    "menu_title": "Выбор похода",
+    "online": "Реальные данжи",
+    "offline": "Тестовые комнаты (offline)",
+    "offline_hint": "Только клиент",
+    "no_dungeons": "Нет доступных данжей (создай героя?)",
+    "entry_cost": "Цена: {{gold}} зол · {{energy}} энергии",
+    "flee": "← Сбежать"
+  },
+  "inventory": {
+    "title": "Инвентарь",
+    "back": "← Назад",
+    "equipped": "Надето",
+    "bag": "Сумка",
+    "tap_again_equip": "Нажми ещё раз, чтобы надеть",
+    "tap_again_unequip": "Нажми ещё раз, чтобы снять",
+    "slot": {
+      "helmet": "Шлем",
+      "chest": "Доспех",
+      "weapon": "Оружие",
+      "offhand": "Щит",
+      "boots": "Сапоги",
+      "ring": "Кольцо"
+    },
+    "menu": {
+      "equip": "Надеть",
+      "unequip": "Снять",
+      "compare": "Сравнить",
+      "cancel": "Отмена"
+    },
+    "compare": {
+      "close": "Закрыть",
+      "no_affixes": "Нет аффиксов",
+      "slot_empty": "Слот пуст"
+    }
   },
   "energy": {
     "label": "Энергия {{current}}/{{cap}}"
+  },
+  "combat": {
+    "skill": {
+      "cleave": { "name": "Рассечь", "hint": "Конусный AoE" },
+      "shield_bash": { "name": "Удар щитом", "hint": "Оглушение" },
+      "whirlwind": { "name": "Вихрь", "hint": "Круговой AoE" },
+      "charge": { "name": "Рывок", "hint": "Дэш с уроном" }
+    },
+    "mob": {
+      "skeleton_warrior": "Скелет-воин",
+      "skeleton_archer": "Скелет-лучник",
+      "zombie": "Зомби"
+    },
+    "death": {
+      "title": "Поражение",
+      "hint": "Награды за раунд можно собрать в Городе.",
+      "return": "Вернуться в Город"
+    }
+  },
+  "act": {
+    "1": { "name": "Акт I: Крипта" },
+    "2": { "name": "Акт II: Лес" },
+    "3": { "name": "Акт III: Замок" }
+  },
+  "location": {
+    "1": {
+      "1": { "name": "Нормальный" },
+      "2": { "name": "Тяжёлый" }
+    },
+    "2": {
+      "1": { "name": "Нормальный" },
+      "2": { "name": "Тяжёлый" }
+    },
+    "3": {
+      "1": { "name": "Нормальный" },
+      "2": { "name": "Мифический" }
+    }
+  },
+  "campaign": {
+    "locked": "Заблокировано",
+    "completed": "Пройдено",
+    "mastered": "Освоено",
+    "first_clear": "Первое прохождение!"
+  },
+  "run_summary": {
+    "title": "Итоги похода",
+    "gold": "Золото",
+    "xp": "Опыт",
+    "duration": "Время",
+    "boss_killed": "Босс повержен!",
+    "continue": "Продолжить → Город",
+    "empty_loot": "Лут не получен"
+  },
+  "floor_cleared": {
+    "toast": "Этаж {{floor}} / {{total}}"
+  },
+  "level_up": {
+    "title": "Новый уровень!",
+    "subtitle": "Уровень {{level}}"
   },
   "errors": {
     "generic": "Что-то пошло не так",
